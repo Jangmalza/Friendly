@@ -1,28 +1,212 @@
 @import "tailwindcss";
 
 @theme {
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: var(--font-sora);
+  --font-mono: var(--font-plex-mono);
 }
 
 :root {
-  --background: #0a0a0a;
-  --foreground: #ededed;
+  --bg: #f3efe4;
+  --bg-2: #efe9db;
+  --surface: #fffdf7;
+  --surface-soft: #f8f4e9;
+  --line: #d8cdb7;
+  --text: #1f2a2d;
+  --text-muted: #5f6b6d;
+  --teal: #0f766e;
+  --teal-soft: #ccfbf1;
+  --amber: #b45309;
+  --amber-soft: #ffedd5;
+  --rose: #be123c;
+  --shadow-lg: 0 20px 42px rgba(66, 49, 20, 0.13);
+  --shadow-sm: 0 7px 18px rgba(66, 49, 20, 0.08);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+  color: var(--text);
+  background:
+    radial-gradient(1400px 700px at 6% 0%, rgba(20, 184, 166, 0.14), transparent 62%),
+    radial-gradient(1200px 620px at 92% -8%, rgba(217, 119, 6, 0.14), transparent 58%),
+    linear-gradient(140deg, var(--bg) 0%, var(--bg-2) 54%, #e8e1d1 100%);
+  font-family: var(--font-sans), sans-serif;
+}
+
+::selection {
+  background: rgba(15, 118, 110, 0.22);
+  color: var(--text);
+}
+
+.app-shell {
+  position: relative;
+  min-height: 100vh;
+  padding: 2rem 1rem 4rem;
+}
+
+.app-shell::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(95, 107, 109, 0.09) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(95, 107, 109, 0.09) 1px, transparent 1px);
+  background-size: 48px 48px;
+  mask-image: radial-gradient(circle at 50% 32%, black 40%, transparent 85%);
+  z-index: 0;
+}
+
+.app-container {
+  position: relative;
+  z-index: 1;
+  max-width: 1680px;
+  margin: 0 auto;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 94%, white 6%);
+  border-radius: 0.55rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.panel-elevated {
+  box-shadow: var(--shadow-lg);
+}
+
+.panel-title {
+  font-size: 0.72rem;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+
+.mono {
+  font-family: var(--font-mono), monospace;
+}
+
+.tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  border-radius: 0.35rem;
+  border: 1px solid;
+  padding: 0.24rem 0.62rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.tag-teal {
+  border-color: color-mix(in srgb, var(--teal) 33%, white);
+  color: var(--teal);
+  background: var(--teal-soft);
+}
+
+.tag-amber {
+  border-color: color-mix(in srgb, var(--amber) 36%, white);
+  color: var(--amber);
+  background: var(--amber-soft);
+}
+
+.tag-rose {
+  border-color: color-mix(in srgb, var(--rose) 33%, white);
+  color: var(--rose);
+  background: color-mix(in srgb, var(--rose) 12%, white);
+}
+
+.status-dot {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  animation: pulse-dot 1.8s infinite ease-in-out;
+}
+
+.status-live {
+  background: #16a34a;
+}
+
+.status-wait {
+  background: #d97706;
+}
+
+.status-idle {
+  background: #475569;
 }
 
 .custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
+  width: 8px;
+  height: 8px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-track {
   background: transparent;
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: rgba(255, 255, 255, 0.1);
-  border-radius: 20px;
+  background: rgba(31, 42, 45, 0.22);
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(31, 42, 45, 0.36);
+}
+
+.reveal {
+  opacity: 0;
+  animation: rise-in 0.55s ease forwards;
+}
+
+.soft-code {
+  background: #111827;
+  color: #d1fae5;
+  border-radius: 0.38rem;
+}
+
+/* Make utility rounded classes in this app feel slightly sharper. */
+.app-shell .rounded-2xl {
+  border-radius: 0.7rem;
+}
+
+.app-shell .rounded-xl {
+  border-radius: 0.52rem;
+}
+
+.app-shell .rounded-lg {
+  border-radius: 0.36rem;
+}
+
+.app-shell .rounded-md {
+  border-radius: 0.24rem;
+}
+
+@keyframes rise-in {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pulse-dot {
+  0%,
+  100% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+
+@media (max-width: 768px) {
+  .app-shell {
+    padding-top: 1.15rem;
+    padding-left: 0.85rem;
+    padding-right: 0.85rem;
+  }
 }

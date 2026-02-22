@@ -5,6 +5,7 @@ from langchain_core.messages import BaseMessage
 class AgentState(TypedDict):
     # 1. 기본 요구사항 및 메타데이터
     user_requirement: str
+    selected_model: str
     revision_count: int
     current_active_agent: str
 

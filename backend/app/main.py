@@ -1,12 +1,20 @@
 import asyncio
 import json
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+import os
+from uuid import uuid4
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Dict, Any
+from pydantic import BaseModel
+from typing import Any, Dict, List, Optional, Tuple
 
+from app.distributed.broker import RedisStreamBroker
+from app.distributed.common import build_safe_event, initial_network_state, now_iso
 from app.workflow.graph import agent_graph as graph
+from app.workflow.nodes import get_available_models, get_default_model, get_fallback_models, resolve_model_name
 
 app = FastAPI(title="AI Orchestrator API")
+network_broker = RedisStreamBroker()
+NETWORK_ROLES = ("pm", "architect", "developer", "tool_execution", "qa", "github_deploy")
 
 origins = ["*"]
 
@@ -24,60 +32,398 @@ def read_root():
     return {"status": "ok", "message": "AI Orchestrator API is running"}
 
 
+@app.on_event("shutdown")
+async def shutdown_event() -> None:
+    await network_broker.close()
+
+
+@app.get("/api/models")
+def list_supported_models():
+    return {
+        "default_model": get_default_model(),
+        "available_models": get_available_models(),
+        "fallback_models": get_fallback_models(),
+    }
+
+
+def _parse_start_payload(raw_payload: str) -> Tuple[str, Optional[str]]:
+    payload_text = raw_payload.strip()
+    if not payload_text:
+        return "", None
+
+    try:
+        parsed = json.loads(payload_text)
+    except json.JSONDecodeError:
+        return payload_text, None
+
+    if isinstance(parsed, dict):
+        prompt = ""
+        for key in ("prompt", "user_requirement"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                prompt = value.strip()
+                break
+
+        requested_model = None
+        for key in ("model", "selected_model", "llm_model"):
+            value = parsed.get(key)
+            if isinstance(value, str):
+                requested_model = value.strip()
+                break
+
+        return prompt, requested_model
+
+    return payload_text, None
+
+
+def _initial_state(prompt: str, selected_model: str) -> Dict[str, Any]:
+    return {
+        "user_requirement": prompt,
+        "selected_model": selected_model,
+        "revision_count": 0,
+        "current_active_agent": "start",
+        "pm_document": "",
+        "architecture_document": "",
+        "source_code": {},
+        "qa_report": "",
+        "total_tokens": 0,
+        "total_cost": 0.0,
+        "execution_logs": [],
+        "messages": []
+    }
+
+
+def _network_run_summary(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "run_id": run_id,
+        "status": state.get("status", "unknown"),
+        "next_role": state.get("next_role"),
+        "selected_model": state.get("selected_model", get_default_model()),
+        "active_node": state.get("current_active_agent"),
+        "total_tokens": state.get("total_tokens", 0),
+        "total_cost": state.get("total_cost", 0.0),
+        "updated_at": state.get("updated_at"),
+    }
+
+
+class NetworkStartRequest(BaseModel):
+    prompt: str
+    selected_model: Optional[str] = None
+
+
+class DLQRequeueRequest(BaseModel):
+    entry_id: str
+    target_role: Optional[str] = None
+    reset_attempt: bool = True
+    delete_from_dlq: bool = True
+
+
+def _resolve_network_role(role: str) -> str:
+    normalized = (role or "").strip()
+    if normalized not in NETWORK_ROLES:
+        allowed = ", ".join(NETWORK_ROLES)
+        raise HTTPException(status_code=400, detail=f"Unsupported role '{normalized}'. Allowed: {allowed}")
+    return normalized
+
+
+@app.post("/api/network/start")
+async def start_network_workflow(req: NetworkStartRequest):
+    prompt = (req.prompt or "").strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="Prompt is required")
+
+    try:
+        selected_model = resolve_model_name(req.selected_model)
+    except ValueError as model_error:
+        raise HTTPException(status_code=400, detail=str(model_error)) from model_error
+
+    run_id = uuid4().hex
+    state = initial_network_state(run_id, prompt, selected_model)
+
+    try:
+        await network_broker.ping()
+        await network_broker.save_state(run_id, state)
+        await network_broker.append_event(
+            run_id,
+            build_safe_event(
+                run_id,
+                state,
+                status="queued",
+                from_role="supervisor",
+                to_role="pm",
+                event_type="workflow_status",
+                note="Distributed workflow queued.",
+            ),
+        )
+        await network_broker.send_task(
+            "pm",
+            {
+                "run_id": run_id,
+                "from_role": "supervisor",
+                "_attempt": 1,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to start distributed workflow: {exc}") from exc
+
+    return {
+        "status": "queued",
+        "run_id": run_id,
+        "selected_model": selected_model,
+        "ws_path": f"/ws/network/{run_id}",
+    }
+
+
+@app.get("/api/network/runs/{run_id}")
+async def get_network_run(run_id: str):
+    state = await network_broker.load_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _network_run_summary(run_id, state)
+
+
+@app.get("/api/network/runs/{run_id}/events")
+async def get_network_run_events(run_id: str, limit: int = 100):
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    state = await network_broker.load_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    history = await network_broker.read_event_history(run_id, count=limit)
+    return {
+        "run_id": run_id,
+        "status": state.get("status", "unknown"),
+        "events": [payload for _, payload in history],
+    }
+
+
+@app.get("/api/network/admin/queues")
+async def get_network_queue_stats(role: Optional[str] = None):
+    group_name = (os.environ.get("NETWORK_TASK_GROUP") or "network-workers").strip() or "network-workers"
+    roles: List[str]
+    if role:
+        roles = [_resolve_network_role(role)]
+    else:
+        roles = list(NETWORK_ROLES)
+
+    queues: List[Dict[str, Any]] = []
+    for item in roles:
+        queue_stats = await network_broker.get_task_group_stats(item, group_name)
+        queues.append(queue_stats)
+
+    return {
+        "group_name": group_name,
+        "roles": roles,
+        "queues": queues,
+    }
+
+
+@app.get("/api/network/admin/dlq/{role}")
+async def get_network_dlq(role: str, limit: int = 100):
+    normalized_role = _resolve_network_role(role)
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    entries = await network_broker.read_dlq_entries(normalized_role, count=limit, reverse=True)
+    return {
+        "role": normalized_role,
+        "count": len(entries),
+        "entries": [{"entry_id": entry_id, "payload": payload} for entry_id, payload in entries],
+    }
+
+
+@app.post("/api/network/admin/dlq/{role}/requeue")
+async def requeue_network_dlq_entry(role: str, req: DLQRequeueRequest):
+    source_role = _resolve_network_role(role)
+    target_role = _resolve_network_role(req.target_role or source_role)
+
+    entry = await network_broker.get_dlq_entry(source_role, req.entry_id)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"DLQ entry '{req.entry_id}' not found for role '{source_role}'")
+
+    _, payload = entry
+    raw_task = payload.get("task")
+    task: Dict[str, Any] = dict(raw_task) if isinstance(raw_task, dict) else {}
+
+    run_id = str(task.get("run_id") or payload.get("run_id") or "").strip()
+    if not run_id:
+        raise HTTPException(status_code=400, detail="DLQ entry does not include run_id")
+
+    task["run_id"] = run_id
+    task["from_role"] = "dlq_redrive"
+    task["queued_at"] = now_iso()
+    task.pop("last_error", None)
+    task.pop("last_failed_at", None)
+
+    if req.reset_attempt:
+        task["_attempt"] = 1
+    else:
+        try:
+            task["_attempt"] = max(1, int(task.get("_attempt", 1)))
+        except (TypeError, ValueError):
+            task["_attempt"] = 1
+
+    state = await network_broker.load_state(run_id)
+    if state is None:
+        raise HTTPException(status_code=404, detail=f"Run state '{run_id}' not found")
+
+    state["status"] = "queued"
+    state["next_role"] = target_role
+    state["updated_at"] = now_iso()
+    await network_broker.save_state(run_id, state)
+    await network_broker.append_event(
+        run_id,
+        build_safe_event(
+            run_id,
+            state,
+            status="queued",
+            from_role="supervisor",
+            to_role=target_role,
+            event_type="workflow_status",
+            note=(
+                f"DLQ redrive: entry={req.entry_id}, source_role={source_role}, "
+                f"target_role={target_role}"
+            ),
+        ),
+    )
+
+    task_entry_id = await network_broker.send_task(target_role, task)
+
+    deleted = 0
+    if req.delete_from_dlq:
+        deleted = await network_broker.delete_dlq_entry(source_role, req.entry_id)
+
+    return {
+        "status": "requeued",
+        "run_id": run_id,
+        "source_role": source_role,
+        "target_role": target_role,
+        "task_entry_id": task_entry_id,
+        "dlq_entry_id": req.entry_id,
+        "dlq_deleted": bool(deleted),
+    }
+
+
+@app.websocket("/ws/network/{run_id}")
+async def network_websocket_endpoint(websocket: WebSocket, run_id: str):
+    await websocket.accept()
+    try:
+        state = await network_broker.load_state(run_id)
+        if state is None:
+            await websocket.send_json({"error": "Run not found", "run_id": run_id})
+            return
+
+        history = await network_broker.read_event_history(run_id, count=300)
+        last_id = "$"
+        for event_id, payload in history:
+            last_id = event_id
+            await websocket.send_json(payload)
+
+        while True:
+            events = await network_broker.read_events(run_id, last_id, block_ms=1000, count=100)
+            for event_id, payload in events:
+                last_id = event_id
+                await websocket.send_json(payload)
+
+            state = await network_broker.load_state(run_id)
+            if state is None:
+                await websocket.send_json({"run_id": run_id, "status": "failed", "error": "Run state lost"})
+                return
+
+            if state.get("status") in {"completed", "failed"} and not events:
+                await websocket.send_json(
+                    build_safe_event(
+                        run_id,
+                        state,
+                        status=state.get("status", "completed"),
+                        from_role="supervisor",
+                        event_type="workflow_status",
+                        note="Distributed workflow finished.",
+                    )
+                )
+                return
+
+    except WebSocketDisconnect:
+        print(f"[network_ws] Client disconnected: {run_id}")
+    except Exception as exc:
+        await websocket.send_json({"run_id": run_id, "status": "failed", "error": str(exc)})
+
+
 @app.websocket("/ws/orchestration/{client_id}")
 async def websocket_endpoint(websocket: WebSocket, client_id: str):
     await websocket.accept()
     # Attempting to retrieve client IP safely from headers
     client_ip = websocket.headers.get("X-Forwarded-For", websocket.client.host if websocket.client else "Unknown")
     print(f"[{client_ip}] Client connected.")
-    
+
+    config = {"configurable": {"thread_id": client_id}}
+    resume_mode = websocket.query_params.get("resume", "").lower() in {"1", "true", "yes"}
+
     try:
-        data = await websocket.receive_text()
-        
-        # UI sends raw text: ws.send(input);
-        prompt = data.strip()
-        
-        if not prompt:
-            await websocket.send_json({"error": "Prompt is required"})
-            return
+        if resume_mode:
+            snapshot = graph.get_state(config)
+            if not snapshot.next:
+                await websocket.send_json({
+                    "status": "completed",
+                    "message": "No paused workflow found for this client_id"
+                })
+                return
 
-        initial_state = {
-            "user_requirement": prompt,
-            "revision_count": 0,
-            "current_active_agent": "start",
-            "pm_document": "",
-            "architecture_document": "",
-            "source_code": {},
-            "qa_report": "",
-            "execution_logs": [],
-            "messages": []
-        }
+            graph_input = None
+            current_full_state = dict(snapshot.values or {})
+            current_full_state.setdefault("messages", [])
+        else:
+            data = await websocket.receive_text()
+            prompt, requested_model = _parse_start_payload(data)
 
-        # Human-in-the-Loop: 스레드 ID 컨피그 주입
-        config = {"configurable": {"thread_id": client_id}}
+            if not prompt:
+                await websocket.send_json({"error": "Prompt is required"})
+                return
 
-        # Maintain the full state throughout the stream
-        current_full_state = initial_state.copy()
+            try:
+                selected_model = resolve_model_name(requested_model)
+            except ValueError as model_error:
+                await websocket.send_json(
+                    {
+                        "error": str(model_error),
+                        "available_models": get_available_models(),
+                        "default_model": get_default_model(),
+                    }
+                )
+                return
+
+            graph_input = _initial_state(prompt, selected_model)
+            current_full_state = graph_input.copy()
 
         # Instead of generic streaming, LangGraph stream yields {node_name: StateUpdates} natively
-        async for output in graph.astream(initial_state, config=config):
+        async for output in graph.astream(graph_input, config=config):
             # output may contain node names or be a dict of updates
             for node_name, node_state in output.items():
                 if node_name == "__interrupt__":
                     continue
-                    
+
                 print(f"Yielding from {node_name}")
-                
+
                 # Merge the partial update into our full state tracker
                 current_full_state.update(node_state)
-                
+
                 # Extract deploy log if we are currently on github_deploy_node
                 deploy_msg = ""
                 if node_name == "github_deploy_node" and node_state.get("messages"):
-                    deploy_msg = node_state["messages"][-1].content
-                elif current_full_state.get("messages") and current_full_state["messages"][-1].content.startswith("[Deploy"):
-                    deploy_msg = current_full_state["messages"][-1].content
-                
+                    last_msg = node_state["messages"][-1]
+                    deploy_msg = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+                elif current_full_state.get("messages"):
+                    last_msg = current_full_state["messages"][-1]
+                    last_msg_content = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
+                    if last_msg_content.startswith("[Deploy"):
+                        deploy_msg = last_msg_content
+
                 # We extract the latest values from the updated full state
                 safe_event = {
                     "active_node": node_state.get("current_active_agent") or node_name,
@@ -88,46 +434,65 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
                     "qa_report": current_full_state.get("qa_report"),
                     "github_deploy_log": deploy_msg,
                     "total_tokens": current_full_state.get("total_tokens", 0),
-                    "total_cost": current_full_state.get("total_cost", 0.0)
+                    "total_cost": current_full_state.get("total_cost", 0.0),
+                    "selected_model": current_full_state.get("selected_model", get_default_model()),
                 }
-                
+
                 await websocket.send_json(safe_event)
                 await asyncio.sleep(0.5)
-                
+
         # 인터럽트 상태 확인
         snapshot = graph.get_state(config)
         if snapshot.next:
-            await websocket.send_json({"status": "WAITING_FOR_USER"})
+            await websocket.send_json(
+                {
+                    "status": "WAITING_FOR_USER",
+                    "selected_model": current_full_state.get("selected_model", get_default_model()),
+                }
+            )
         else:
-            await websocket.send_json({"status": "completed"})
-            
-    except Exception as e:
-        await websocket.send_json({"error": str(e)})
+            await websocket.send_json(
+                {
+                    "status": "completed",
+                    "selected_model": current_full_state.get("selected_model", get_default_model()),
+                }
+            )
 
     except WebSocketDisconnect:
         print("Client disconnected")
 
-from pydantic import BaseModel
+    except Exception as e:
+        await websocket.send_json({"error": str(e)})
 
 class ResumeRequest(BaseModel):
     client_id: str
-    pm_document: str = None
-    architecture_document: str = None
+    pm_document: Optional[str] = None
+    architecture_document: Optional[str] = None
+    selected_model: Optional[str] = None
 
 @app.post("/api/resume")
 async def resume_workflow(req: ResumeRequest):
     config = {"configurable": {"thread_id": req.client_id}}
-    
-    # Update state with user edits
-    graph.update_state(
-        config,
-        {
-            "pm_document": req.pm_document,
-            "architecture_document": req.architecture_document
-        }
-    )
-    
-    # We don't stream here for simplicity; the WS might be disconnected.
-    # In a full app, we'd notify the active WS session to resume streaming.
-    # For now, we just resume the graph in the background (or block until done).
-    return {"status": "resumed", "client_id": req.client_id}
+
+    updates: Dict[str, Any] = {}
+    if req.pm_document is not None:
+        updates["pm_document"] = req.pm_document
+    if req.architecture_document is not None:
+        updates["architecture_document"] = req.architecture_document
+    if req.selected_model is not None:
+        try:
+            updates["selected_model"] = resolve_model_name(req.selected_model)
+        except ValueError as model_error:
+            raise HTTPException(status_code=400, detail=str(model_error)) from model_error
+
+    if updates:
+        graph.update_state(config, updates)
+
+    snapshot = graph.get_state(config)
+    snapshot_state = dict(snapshot.values or {})
+    return {
+        "status": "resumed",
+        "client_id": req.client_id,
+        "waiting_nodes": list(snapshot.next) if snapshot.next else [],
+        "selected_model": snapshot_state.get("selected_model", get_default_model()),
+    }
