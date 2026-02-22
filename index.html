@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Orchestrator Dashboard</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-dark: #0f1115;
+            --panel-bg: rgba(255, 255, 255, 0.03);
+            --panel-border: rgba(255, 255, 255, 0.08);
+            --primary: #6366f1;
+            --primary-hover: #4f46e5;
+            --text-main: #f3f4f6;
+            --text-muted: #9ca3af;
+            --success: #10b981;
+            --error: #ef4444;
+            --warning: #f59e0b;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            margin: 0;
+            padding: 40px 20px;
+            display: flex;
+            justify-content: center;
+            min-height: 100vh;
+            background-image: radial-gradient(circle at 15% 50%, rgba(99, 102, 241, 0.15), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(16, 185, 129, 0.1), transparent 25%);
+        }
+
+        .container {
+            width: 100%;
+            max-width: 1000px;
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 10px;
+        }
+
+        .header h1 {
+            font-size: 32px;
+            font-weight: 700;
+            margin: 0 0 8px 0;
+            background: linear-gradient(to right, #818cf8, #c084fc);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        .header p {
+            color: var(--text-muted);
+            margin: 0;
+            font-size: 15px;
+        }
+
+        .metrics-badge {
+            display: inline-block;
+            margin-top: 12px;
+            padding: 6px 16px;
+            background: rgba(99, 102, 241, 0.1);
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            border-radius: 20px;
+            font-size: 13px;
+            color: #818cf8;
+            font-family: 'Consolas', monospace;
+        }
+
+        .glass-panel {
+            background: var(--panel-bg);
+            border: 1px solid var(--panel-border);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border-radius: 16px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+
+        .input-group {
+            display: flex;
+            gap: 16px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            background: rgba(0, 0, 0, 0.2);
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+            padding: 16px 20px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-family: 'Inter', sans-serif;
+            transition: all 0.2s ease;
+            outline: none;
+        }
+
+        input[type="text"]:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+        }
+
+        input[type="text"]::placeholder {
+            color: #6b7280;
+        }
+
+        button {
+            background: var(--primary);
+            color: white;
+            border: none;
+            padding: 0 32px;
+            border-radius: 12px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        button:hover:not(:disabled) {
+            background: var(--primary-hover);
+            transform: translateY(-1px);
+        }
+
+        button:disabled {
+            background: #374151;
+            color: #90a4ae;
+            cursor: not-allowed;
+        }
+
+        .workflow-stage {
+            display: grid;
+            grid-template-columns: repeat(5, 1fr);
+            gap: 16px;
+            margin-top: 8px;
+        }
+
+        .agent-card {
+            background: rgba(255, 255, 255, 0.02);
+            border: 1px solid var(--panel-border);
+            border-radius: 12px;
+            padding: 20px 16px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            text-align: center;
+            gap: 12px;
+            transition: all 0.3s ease;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .agent-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 2px;
+            background: transparent;
+            transition: background 0.3s ease;
+        }
+
+        .agent-card.active {
+            background: rgba(99, 102, 241, 0.05);
+            border-color: rgba(99, 102, 241, 0.3);
+            transform: translateY(-4px);
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+        }
+
+        .agent-card.active::before {
+            background: var(--primary);
+        }
+
+        .agent-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.05);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 20px;
+            color: var(--text-muted);
+            transition: all 0.3s ease;
+        }
+
+        .agent-card.active .agent-icon {
+            background: var(--primary);
+            color: white;
+            box-shadow: 0 0 15px rgba(99, 102, 241, 0.4);
+        }
+
+        .agent-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .agent-role {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-main);
+        }
+
+        .agent-status-text {
+            font-size: 12px;
+            color: var(--text-muted);
+            height: 14px;
+            transition: color 0.3s ease;
+        }
+
+        .agent-card.active .agent-status-text {
+            color: #818cf8;
+            font-weight: 500;
+            animation: pulse-text 1.5s infinite;
+        }
+
+        @keyframes pulse-text {
+            0% {
+                opacity: 0.6;
+            }
+
+            50% {
+                opacity: 1;
+            }
+
+            100% {
+                opacity: 0.6;
+            }
+        }
+
+        .terminal-container {
+            display: flex;
+            flex-direction: column;
+            height: 450px;
+        }
+
+        .terminal-header {
+            background: #1e1e20;
+            padding: 12px 16px;
+            border-radius: 12px 12px 0 0;
+            border: 1px solid var(--panel-border);
+            border-bottom: none;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .mac-btns {
+            display: flex;
+            gap: 6px;
+        }
+
+        .mac-btn {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+
+        .mac-btn.close {
+            background: #ed6a5e;
+        }
+
+        .mac-btn.min {
+            background: #f4bf4f;
+        }
+
+        .mac-btn.max {
+            background: #61c554;
+        }
+
+        .terminal-title {
+            margin-left: 12px;
+            font-size: 12px;
+            color: #888;
+            font-family: monospace;
+        }
+
+        .terminal-body {
+            background: #131417;
+            border: 1px solid var(--panel-border);
+            border-radius: 0 0 12px 12px;
+            padding: 20px;
+            flex: 1;
+            overflow-y: auto;
+            font-family: 'Consolas', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            color: #e5e7eb;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .log-item {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            animation: fadeIn 0.3s ease-out forwards;
+        }
+
+        .log-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .log-badge {
+            font-size: 11px;
+            font-weight: 600;
+            padding: 2px 8px;
+            border-radius: 4px;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+        }
+
+        .badge-system {
+            background: rgba(156, 163, 175, 0.15);
+            color: #9ca3af;
+        }
+
+        .badge-pm {
+            background: rgba(99, 102, 241, 0.15);
+            color: #818cf8;
+        }
+
+        .badge-architect {
+            background: rgba(16, 185, 129, 0.15);
+            color: #34d399;
+        }
+
+        .badge-developer {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+        }
+
+        .badge-tool_execution {
+            background: rgba(236, 72, 153, 0.15);
+            color: #f472b6;
+        }
+
+        .badge-qa {
+            background: rgba(139, 92, 246, 0.15);
+            color: #a78bfa;
+        }
+
+        .log-content {
+            color: #d1d5db;
+            white-space: pre-wrap;
+            word-break: break-word;
+            padding-left: 8px;
+            border-left: 2px solid rgba(255, 255, 255, 0.1);
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(5px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .spinner {
+            display: none;
+            width: 14px;
+            height: 14px;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 50%;
+            border-top-color: #fff;
+            animation: spin 1s linear infinite;
+        }
+
+        button:disabled .spinner {
+            display: inline-block;
+        }
+
+        button:disabled .btn-text {
+            margin-right: 8px;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: rgba(0, 0, 0, 0.1);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="container">
+        <div class="header">
+            <h1>AI Orchestrator</h1>
+            <p>Autonomous Agent Workflow System</p>
+            <div class="metrics-badge" id="metricsDisplay">
+                <span id="tokenCount">Tokens: 0</span> | <span id="costCount">Cost: $0.0000</span>
+            </div>
+        </div>
+
+        <div class="glass-panel">
+            <form class="input-group" id="inputForm" onsubmit="event.preventDefault(); startOrchestration();">
+                <input type="text" id="userInput"
+                    placeholder="Describe the software you want to build... (e.g., 'A Python CLI calculator')">
+                <button id="sendBtn" type="submit">
+                    <span class="btn-text">Execute Workflow</span>
+                    <div class="spinner"></div>
+                </button>
+            </form>
+        </div>
+
+        <div class="workflow-stage">
+            <div class="agent-card" id="agent-pm_node">
+                <div class="agent-icon">PM</div>
+                <div class="agent-info">
+                    <span class="agent-role">Product Manager</span>
+                    <span class="agent-status-text">Pending</span>
+                </div>
+            </div>
+            <div class="agent-card" id="agent-architect_node">
+                <div class="agent-icon">AR</div>
+                <div class="agent-info">
+                    <span class="agent-role">System Architect</span>
+                    <span class="agent-status-text">Pending</span>
+                </div>
+            </div>
+            <div class="agent-card" id="agent-developer_node">
+                <div class="agent-icon">DEV</div>
+                <div class="agent-info">
+                    <span class="agent-role">Software Engineer</span>
+                    <span class="agent-status-text">Pending</span>
+                </div>
+            </div>
+            <div class="agent-card" id="agent-tool_execution_node">
+                <div class="agent-icon">SYS</div>
+                <div class="agent-info">
+                    <span class="agent-role">Runtime Env</span>
+                    <span class="agent-status-text">Pending</span>
+                </div>
+            </div>
+            <div class="agent-card" id="agent-qa_node">
+                <div class="agent-icon">QA</div>
+                <div class="agent-info">
+                    <span class="agent-role">QA Engineer</span>
+                    <span class="agent-status-text">Pending</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="terminal-container">
+            <div class="terminal-header">
+                <div class="mac-btns">
+                    <div class="mac-btn close"></div>
+                    <div class="mac-btn min"></div>
+                    <div class="mac-btn max"></div>
+                </div>
+                <div class="terminal-title">orchestrator_logs ~ zsh</div>
+            </div>
+            <div class="terminal-body" id="outputArea">
+                <div class="log-item">
+                    <div class="log-header"><span class="log-badge badge-system">SYSTEM</span></div>
+                    <div class="log-content">System initialized. Awaiting user instruction...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+
+        const agentStatusMessages = {
+            'pm_node': 'Drafting PRD...',
+            'architect_node': 'Designing Architecture...',
+            'developer_node': 'Writing Code...',
+            'tool_execution_node': 'Sandbox Validation...',
+            'qa_node': 'Inspecting Code...'
+        };
+
+        function startOrchestration() {
+            const input = document.getElementById('userInput').value;
+            if (!input.trim()) {
+                alert("Please enter a requirement.");
+                return;
+            }
+
+            const outputArea = document.getElementById('outputArea');
+            const sendBtn = document.getElementById('sendBtn');
+            const btnText = sendBtn.querySelector('.btn-text');
+
+            outputArea.innerHTML = '';
+            sendBtn.disabled = true;
+            btnText.innerText = "Processing";
+
+            resetAgents();
+            addLog('system', 'Workflow execution initiated. Connecting to orchestration engine...');
+
+            const clientId = Math.random().toString(36).substring(7);
+            const host = window.location.hostname || "127.0.0.1";
+            ws = new WebSocket(`ws://${host}:8000/ws/orchestration/${clientId}`);
+
+            ws.onopen = function () {
+                ws.send(input);
+                addLog('system', `Instruction sent -> "${input}"`);
+            };
+
+            ws.onmessage = function (event) {
+                const response = JSON.parse(event.data);
+
+                if (response.total_tokens !== undefined) {
+                    document.getElementById('tokenCount').innerText = `Tokens: ${response.total_tokens.toLocaleString()}`;
+                }
+                if (response.total_cost !== undefined) {
+                    document.getElementById('costCount').innerText = `Cost: $${response.total_cost.toFixed(4)}`;
+                }
+
+                if (response.status === "ALL_DONE" || response.status === "completed") {
+                    addLog('system', 'Workflow execution completed successfully. Pipeline terminated.');
+                    finalizeAgents();
+                    sendBtn.disabled = false;
+                    btnText.innerText = "Execute Workflow";
+                    ws.close();
+                    return;
+                }
+
+                if (response.status === "ERROR" || response.error) {
+                    addLog('system', `[ERROR] Pipeline failed: ${response.message || response.error}`);
+                    resetAgents();
+                    sendBtn.disabled = false;
+                    btnText.innerText = "Execute Workflow";
+                    return;
+                }
+
+                if (response.active_node) {
+                    const active_agent = response.active_node;
+                    activateAgent(active_agent);
+
+                    let logContent = "";
+
+                    if (active_agent === 'pm_node' && response.pm_spec) {
+                        logContent = response.pm_spec;
+                    } else if (active_agent === 'architect_node' && response.architecture_spec) {
+                        logContent = response.architecture_spec;
+                    } else if (active_agent === 'developer_node' && response.source_code) {
+                        logContent = "Artifacts Generated:\n" + JSON.stringify(response.source_code, null, 2);
+                    } else if (active_agent === 'tool_execution_node' && response.current_logs) {
+                        logContent = response.current_logs;
+                    } else if (active_agent === 'qa_node' && response.qa_report) {
+                        logContent = response.qa_report;
+                        if (response.qa_report.includes("STATUS: FAIL")) {
+                            logContent += "\n\n[WARNING] QA rejected the build. Reverting to Development node.";
+                        }
+                    }
+
+                    if (logContent) {
+                        addLog(active_agent.replace('_node', ''), logContent);
+                    }
+                }
+            };
+
+            ws.onerror = function () {
+                addLog('system', '[FATAL] WebSocket connection failed. Ensure the backend server is running on port 8000.');
+                sendBtn.disabled = false;
+                btnText.innerText = "Execute Workflow";
+                resetAgents();
+            };
+        }
+
+        function activateAgent(agentId) {
+            const agents = document.querySelectorAll('.agent-card');
+            let reachedActive = false;
+            agents.forEach(agent => {
+                const statusText = agent.querySelector('.agent-status-text');
+                if (agent.id === `agent-${agentId}`) {
+                    agent.classList.add('active');
+                    statusText.innerText = agentStatusMessages[agentId] || 'Processing...';
+                    reachedActive = true;
+                } else {
+                    agent.classList.remove('active');
+                    if (!reachedActive) {
+                        statusText.innerText = 'Completed';
+                    } else {
+                        statusText.innerText = 'Pending';
+                    }
+                }
+            });
+        }
+
+        function resetAgents() {
+            const agents = document.querySelectorAll('.agent-card');
+            agents.forEach(agent => {
+                agent.classList.remove('active');
+                agent.querySelector('.agent-status-text').innerText = 'Pending';
+            });
+        }
+
+        function finalizeAgents() {
+            const agents = document.querySelectorAll('.agent-card');
+            agents.forEach(agent => {
+                agent.classList.remove('active');
+                const st = agent.querySelector('.agent-status-text');
+                st.innerText = 'Completed';
+            });
+        }
+
+        function addLog(type, message) {
+            const outputArea = document.getElementById('outputArea');
+            const entry = document.createElement('div');
+            entry.className = 'log-item';
+
+            const header = document.createElement('div');
+            header.className = 'log-header';
+
+            const badge = document.createElement('span');
+            badge.className = `log-badge badge-${type}`;
+            badge.innerText = type.toUpperCase();
+
+            header.appendChild(badge);
+
+            const content = document.createElement('div');
+            content.className = 'log-content';
+            content.innerText = message;
+
+            entry.appendChild(header);
+            entry.appendChild(content);
+            outputArea.appendChild(entry);
+
+            // Auto-scroll to bottom
+            outputArea.scrollTop = outputArea.scrollHeight;
+        }
+    </script>
+
+</body>
+
+</html>

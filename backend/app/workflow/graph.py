@@ -1,46 +1,56 @@
 from langgraph.graph import StateGraph, END
 from typing import Literal
 
-from .state import WorkflowState
-from .nodes import pm_node, architect_node, developer_node, tool_node, qa_node
+from .state import AgentState
+from .nodes import pm_node, architect_node, developer_node, tool_execution_node, qa_node
 
-def should_continue(state: WorkflowState) -> Literal["developer_node", "END"]:
-    # Simplistic conditional logic for now
-    if state.get("error_counter", 0) > 3:
-        return "END"
-    
-    # Needs actual logic based on QA analysis result
-    # Assuming valid or invalid state flag attached to execution_logs later
-    if getattr(state, "is_valid", True): 
-        return "END"
-    else:
+def qa_router(state: AgentState):
+    qa_report = state.get("qa_report", "")
+    revision_count = state.get("revision_count", 0)
+    max_retries = 3
+
+    # 최대 수정 횟수 초과 시 강제 종료
+    if revision_count >= max_retries:
+        return "end"
+
+    # QA 리포트에서 상태 코드 분석
+    if "STATUS: PASS" in qa_report:
+        return "end"
+    elif "STATUS: FAIL" in qa_report:
         return "developer_node"
+    else:
+        # 상태 코드가 명확하지 않은 경우 안전을 위해 종료
+        return "end"
 
-builder = StateGraph(WorkflowState)
+# 1. 그래프 초기화 (상태 객체 스키마 주입)
+workflow = StateGraph(AgentState)
 
-builder.add_node("pm_node", pm_node)
-builder.add_node("architect_node", architect_node)
-builder.add_node("developer_node", developer_node)
-builder.add_node("tool_node", tool_node)
-builder.add_node("qa_node", qa_node)
+# 2. 노드 등록
+workflow.add_node("pm_node", pm_node)
+workflow.add_node("architect_node", architect_node)
+workflow.add_node("developer_node", developer_node)
+workflow.add_node("tool_execution_node", tool_execution_node)
+workflow.add_node("qa_node", qa_node)
 
+# 3. 진입점 설정
+workflow.set_entry_point("pm_node")
 
-builder.set_entry_point("pm_node")
+# 4. 순차적 실행 엣지 연결
+workflow.add_edge("pm_node", "architect_node")
+workflow.add_edge("architect_node", "developer_node")
+workflow.add_edge("developer_node", "tool_execution_node")
+workflow.add_edge("tool_execution_node", "qa_node")
 
-builder.add_edge("pm_node", "architect_node")
-builder.add_edge("architect_node", "developer_node")
-builder.add_edge("developer_node", "tool_node")
-builder.add_edge("tool_node", "qa_node")
-
-# Conditional edge based on QA review
-builder.add_conditional_edges(
-    "qa_node", 
-    should_continue,
+# 5. 조건부 엣지 연결 (QA 결과에 따른 분기)
+workflow.add_conditional_edges(
+    "qa_node",
+    qa_router,
     {
+        # 라우터 함수의 반환값에 따라 이동할 실제 노드 매핑
         "developer_node": "developer_node",
-        "END": END
+        "end": END
     }
 )
 
-graph = builder.compile()
-
+# 6. 그래프 컴파일
+agent_graph = workflow.compile()

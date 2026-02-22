@@ -53,10 +53,16 @@ export default function Dashboard() {
           ...data
         }));
 
-        // Determine active agent dynamically based on populated specs (Simplified logic)
-        if (data.pm_spec && !data.architecture_spec) setActiveAgent("architect");
-        else if (data.architecture_spec && !data.current_logs) setActiveAgent("developer");
-        else if (data.current_logs) setActiveAgent("qa");
+        // Determine active agent based on the explicit state provided by the backend
+        if (data.active_node) {
+          let uiAgent = "pm";
+          if (data.active_node.includes("architect")) uiAgent = "architect";
+          if (data.active_node.includes("developer") || data.active_node.includes("tool")) uiAgent = "developer";
+          if (data.active_node.includes("qa")) uiAgent = "qa";
+          if (data.active_node === "END") uiAgent = "done";
+
+          setActiveAgent(uiAgent);
+        }
 
       } catch (e) {
         console.error("Error parsing WS message", e);
