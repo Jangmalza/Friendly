@@ -50,11 +50,12 @@ interface WorkflowMessage {
   updated_at?: string;
 }
 
-interface AgentChatTurn {
+interface RuntimeTimelineItem {
   id: string;
   timeLabel: string;
-  fromRole: string;
-  toRole: string;
+  category: "chat" | "event";
+  fromRole?: string;
+  toRole?: string;
   message: string;
 }
 
@@ -117,10 +118,32 @@ interface DLQRequeueResponse {
   dlq_deleted?: boolean;
 }
 
+interface RequeueCandidate {
+  entryId: string;
+  runId: string;
+  attemptLabel: string;
+}
+
 const FALLBACK_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5-mini", "gpt-5"];
 const NETWORK_ROLES = ["pm", "architect", "developer", "tool_execution", "qa", "github_deploy"] as const;
 type NetworkRole = (typeof NETWORK_ROLES)[number];
-type DashboardView = "user" | "operator";
+type RuntimeRoleFilter = "all" | "event" | NetworkRole;
+const WS_RECONNECT_DEFAULT_MAX_ATTEMPTS = 5;
+const WS_RECONNECT_DEFAULT_BASE_DELAY_MS = 1000;
+const WS_RECONNECT_DEFAULT_MAX_DELAY_MS = 15000;
+const RUNTIME_TIMELINE_MAX_ITEMS = 400;
+
+const buildInitialRuntimeTimeline = (): RuntimeTimelineItem[] => {
+  const now = new Date().toLocaleTimeString("ko-KR", { hour12: false });
+  return [
+    {
+      id: "runtime-init",
+      timeLabel: now,
+      category: "event",
+      message: "System initialized. Awaiting a new request.",
+    },
+  ];
+};
 
 const initialWorkflowState: WorkflowState = {
   pm_spec: null,
@@ -184,6 +207,13 @@ const asNumber = (value: unknown, fallback = 0): number => {
   return fallback;
 };
 
+const clampInt = (value: number, min: number, max: number): number => {
+  if (!Number.isFinite(value)) {
+    return min;
+  }
+  return Math.max(min, Math.min(max, Math.trunc(value)));
+};
+
 const summarizeDlqEntry = (entry: DLQEntry) => {
   const payload = asRecord(entry.payload);
   const task = asRecord(payload.task);
@@ -211,16 +241,24 @@ const extractErrorMessage = async (response: Response): Promise<string> => {
 export default function Dashboard() {
   const [prompt, setPrompt] = useState("");
   const [selectedModel, setSelectedModel] = useState(FALLBACK_MODELS[0]);
+  const [reconnectMaxAttempts, setReconnectMaxAttempts] = useState(WS_RECONNECT_DEFAULT_MAX_ATTEMPTS);
+  const [reconnectBaseDelaySec, setReconnectBaseDelaySec] = useState(WS_RECONNECT_DEFAULT_BASE_DELAY_MS / 1000);
+  const [reconnectMaxDelaySec, setReconnectMaxDelaySec] = useState(WS_RECONNECT_DEFAULT_MAX_DELAY_MS / 1000);
   const [modelOptions, setModelOptions] = useState<string[]>(FALLBACK_MODELS);
   const [fallbackModelOptions, setFallbackModelOptions] = useState<string[]>([]);
   const [requestedModelForRun, setRequestedModelForRun] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [isReconnecting, setIsReconnecting] = useState(false);
+  const [showOperatorPanel, setShowOperatorPanel] = useState(false);
+  const [runtimeSearch, setRuntimeSearch] = useState("");
+  const [runtimeRoleFilter, setRuntimeRoleFilter] = useState<RuntimeRoleFilter>("all");
+  const [autoScrollTimeline, setAutoScrollTimeline] = useState(true);
+  const [fileFilter, setFileFilter] = useState("");
+  const [copiedFilePath, setCopiedFilePath] = useState<string | null>(null);
   const [currentClientId, setCurrentClientId] = useState<string | null>(null);
   const [activeAgent, setActiveAgent] = useState<string>("idle");
-  const [eventFeed, setEventFeed] = useState<string[]>(["System initialized. Awaiting a new request."]);
-  const [agentChats, setAgentChats] = useState<AgentChatTurn[]>([]);
-  const [dashboardView, setDashboardView] = useState<DashboardView>("user");
+  const [runtimeTimeline, setRuntimeTimeline] = useState<RuntimeTimelineItem[]>(() => buildInitialRuntimeTimeline());
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
   const [lastUpdateAt, setLastUpdateAt] = useState<string | null>(null);
   const [workflowState, setWorkflowState] = useState<WorkflowState>(initialWorkflowState);
@@ -233,19 +271,52 @@ export default function Dashboard() {
   const [isDlqLoading, setIsDlqLoading] = useState(false);
   const [redriveEntryId, setRedriveEntryId] = useState<string | null>(null);
   const [adminError, setAdminError] = useState<string | null>(null);
+  const [requeueCandidate, setRequeueCandidate] = useState<RequeueCandidate | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastNodeRef = useRef<string | null>(null);
   const lastModelRef = useRef<string | null>(null);
+  const runtimeSeqRef = useRef(0);
   const agentChatSeenRef = useRef<Set<string>>(new Set());
-  const chatScrollRef = useRef<HTMLDivElement | null>(null);
+  const timelineScrollRef = useRef<HTMLDivElement | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const reconnectAttemptRef = useRef(0);
+  const activeRunIdRef = useRef<string | null>(null);
+  const runTerminalRef = useRef(false);
+  const reconnectPolicyRef = useRef({
+    maxAttempts: WS_RECONNECT_DEFAULT_MAX_ATTEMPTS,
+    baseDelayMs: WS_RECONNECT_DEFAULT_BASE_DELAY_MS,
+    maxDelayMs: WS_RECONNECT_DEFAULT_MAX_DELAY_MS,
+  });
+
+  const nextRuntimeId = (prefix: string) => {
+    runtimeSeqRef.current += 1;
+    return `${prefix}-${runtimeSeqRef.current}`;
+  };
 
   const addEvent = (message: string) => {
     const ts = new Date().toLocaleTimeString("ko-KR", { hour12: false });
-    setEventFeed((prev) => [...prev.slice(-199), `[${ts}] ${message}`]);
+    setRuntimeTimeline((prev) => [
+      ...prev.slice(-(RUNTIME_TIMELINE_MAX_ITEMS - 1)),
+      {
+        id: nextRuntimeId("event"),
+        timeLabel: ts,
+        category: "event",
+        message,
+      },
+    ]);
+  };
+
+  const clearReconnectTimer = () => {
+    if (reconnectTimerRef.current !== null) {
+      window.clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
   };
 
   const closeCurrentSocket = () => {
+    clearReconnectTimer();
+
     const socket = wsRef.current;
     if (!socket) return;
 
@@ -291,27 +362,135 @@ export default function Dashboard() {
     return "border-[color:var(--line)] bg-[#f8f2e5] text-[color:var(--text)]";
   };
 
+  const syncRunSnapshot = async (runId: string): Promise<string | null> => {
+    try {
+      const response = await fetch(`${buildApiBaseUrl()}/api/network/runs/${runId}`);
+      if (!response.ok) {
+        return null;
+      }
+
+      const payload = (await response.json()) as {
+        status?: string;
+        active_node?: string | null;
+        selected_model?: string | null;
+        total_tokens?: number;
+        total_cost?: number;
+      };
+
+      if (activeRunIdRef.current !== runId) {
+        return null;
+      }
+
+      const status = typeof payload.status === "string" ? payload.status : "unknown";
+      const activeNode = typeof payload.active_node === "string" ? payload.active_node : null;
+      const selectedModelName = typeof payload.selected_model === "string" ? payload.selected_model : null;
+      const totalTokens = typeof payload.total_tokens === "number" ? payload.total_tokens : undefined;
+      const totalCost = typeof payload.total_cost === "number" ? payload.total_cost : undefined;
+
+      setWorkflowState((prev) => ({
+        ...prev,
+        status,
+        active_node: activeNode ?? prev.active_node,
+        selected_model: selectedModelName ?? prev.selected_model,
+        total_tokens: totalTokens ?? prev.total_tokens,
+        total_cost: totalCost ?? prev.total_cost,
+      }));
+
+      if (activeNode) {
+        lastNodeRef.current = activeNode;
+        setActiveAgent(mapActiveAgent(activeNode));
+      }
+      if (selectedModelName) {
+        lastModelRef.current = selectedModelName;
+      }
+
+      setLastUpdateAt(new Date().toLocaleTimeString("ko-KR", { hour12: false }));
+
+      if (status === "completed") {
+        runTerminalRef.current = true;
+        setIsRunning(false);
+        setIsReconnecting(false);
+        setActiveAgent("done");
+      } else if (status === "failed") {
+        runTerminalRef.current = true;
+        setIsRunning(false);
+        setIsReconnecting(false);
+      } else {
+        setIsRunning(true);
+      }
+
+      return status;
+    } catch {
+      return null;
+    }
+  };
+
   useEffect(() => {
-    const el = chatScrollRef.current;
+    const el = timelineScrollRef.current;
     if (!el) return;
+    if (!autoScrollTimeline) return;
     el.scrollTop = el.scrollHeight;
-  }, [agentChats]);
+  }, [autoScrollTimeline, runtimeTimeline]);
 
   useEffect(() => {
     const files = workflowState.source_code ? Object.keys(workflowState.source_code).sort() : [];
+    const normalizedFilter = fileFilter.trim().toLowerCase();
+    const visibleFiles = normalizedFilter
+      ? files.filter((path) => path.toLowerCase().includes(normalizedFilter))
+      : files;
+
     if (files.length === 0) {
       setSelectedFile(null);
       return;
     }
 
-    if (!selectedFile || !workflowState.source_code?.[selectedFile]) {
-      setSelectedFile(files[0]);
+    if (visibleFiles.length === 0) {
+      return;
     }
-  }, [workflowState.source_code, selectedFile]);
+
+    if (!selectedFile || !workflowState.source_code?.[selectedFile] || !visibleFiles.includes(selectedFile)) {
+      setSelectedFile(visibleFiles[0]);
+    }
+  }, [fileFilter, workflowState.source_code, selectedFile]);
+
+  useEffect(() => {
+    if (!copiedFilePath) return;
+    const timer = window.setTimeout(() => setCopiedFilePath(null), 1200);
+    return () => window.clearTimeout(timer);
+  }, [copiedFilePath]);
+
+  useEffect(() => {
+    const maxAttempts = clampInt(reconnectMaxAttempts, 1, 20);
+    const baseDelayMs = clampInt(reconnectBaseDelaySec * 1000, 500, 60000);
+    const maxDelayMsRaw = clampInt(reconnectMaxDelaySec * 1000, 1000, 120000);
+    const maxDelayMs = Math.max(baseDelayMs, maxDelayMsRaw);
+
+    reconnectPolicyRef.current = {
+      maxAttempts,
+      baseDelayMs,
+      maxDelayMs,
+    };
+  }, [reconnectBaseDelaySec, reconnectMaxAttempts, reconnectMaxDelaySec]);
 
   useEffect(() => {
     return () => {
-      closeCurrentSocket();
+      if (reconnectTimerRef.current !== null) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+
+      const socket = wsRef.current;
+      if (!socket) return;
+
+      socket.onopen = null;
+      socket.onmessage = null;
+      socket.onerror = null;
+      socket.onclose = null;
+
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close();
+      }
+      wsRef.current = null;
     };
   }, []);
 
@@ -408,13 +587,14 @@ export default function Dashboard() {
 
   useEffect(() => {
     setRedriveTargetRole(adminRole);
-    if (dashboardView === "operator") {
+    setRequeueCandidate(null);
+    if (showOperatorPanel) {
       void refreshAdminPanel(true);
     }
-  }, [adminRole, dashboardView, refreshAdminPanel]);
+  }, [adminRole, refreshAdminPanel, showOperatorPanel]);
 
   useEffect(() => {
-    if (dashboardView !== "operator") {
+    if (!showOperatorPanel) {
       return;
     }
     const intervalMs = isRunning ? 5000 : 15000;
@@ -422,7 +602,7 @@ export default function Dashboard() {
       void refreshAdminPanel(false);
     }, intervalMs);
     return () => window.clearInterval(timer);
-  }, [dashboardView, isRunning, refreshAdminPanel]);
+  }, [isRunning, refreshAdminPanel, showOperatorPanel]);
 
   const handleRequeueDlqEntry = async (entryId: string) => {
     setRedriveEntryId(entryId);
@@ -458,9 +638,11 @@ export default function Dashboard() {
 
   const handleWorkflowMessage = (raw: WorkflowMessage) => {
     if (raw.error) {
+      runTerminalRef.current = true;
       setWorkflowState((prev) => ({ ...prev, error: raw.error ?? "Unknown workflow error" }));
       addEvent(`[ERROR] ${raw.error}`);
       setIsRunning(false);
+      setIsReconnecting(false);
       return;
     }
 
@@ -498,14 +680,16 @@ export default function Dashboard() {
     if (raw.event_type === "agent_chat" && messageText && raw.from_role) {
       const fromRole = raw.from_role;
       const toRole = raw.to_role ?? "supervisor";
+      const timeLabel = toTimeLabel(raw.updated_at);
       const dedupeKey = `${raw.updated_at ?? ""}|${fromRole}|${toRole}|${messageText}`;
       if (!agentChatSeenRef.current.has(dedupeKey)) {
         agentChatSeenRef.current.add(dedupeKey);
-        setAgentChats((prev) => [
-          ...prev.slice(-149),
+        setRuntimeTimeline((prev) => [
+          ...prev.slice(-(RUNTIME_TIMELINE_MAX_ITEMS - 1)),
           {
-            id: dedupeKey,
-            timeLabel: toTimeLabel(raw.updated_at),
+            id: nextRuntimeId("chat"),
+            timeLabel,
+            category: "chat",
             fromRole,
             toRole,
             message: messageText,
@@ -531,14 +715,18 @@ export default function Dashboard() {
     }
 
     if (raw.status === "completed") {
+      runTerminalRef.current = true;
       setActiveAgent("done");
       setIsRunning(false);
+      setIsReconnecting(false);
       addEvent("Workflow completed.");
       return;
     }
 
     if (raw.status === "failed") {
+      runTerminalRef.current = true;
       setIsRunning(false);
+      setIsReconnecting(false);
       setWorkflowState((prev) => ({ ...prev, error: raw.message ?? prev.error ?? "Workflow failed" }));
       addEvent(`Workflow failed.${raw.message ? ` ${raw.message}` : ""}`);
       return;
@@ -549,26 +737,74 @@ export default function Dashboard() {
     }
   };
 
-  const connectNetworkWorkflow = (runId: string) => {
+  const connectNetworkWorkflow = (runId: string, options?: { isRetry?: boolean }) => {
+    clearReconnectTimer();
     closeCurrentSocket();
     const socket = new WebSocket(`${buildWsBaseUrl()}/ws/network/${runId}`);
     wsRef.current = socket;
+    setIsReconnecting(Boolean(options?.isRetry));
 
     socket.onopen = () => {
       setIsConnected(true);
+      setIsReconnecting(false);
+      reconnectAttemptRef.current = 0;
+      if (options?.isRetry) {
+        addEvent("[WS] Reconnected.");
+      }
+      void syncRunSnapshot(runId);
     };
 
     socket.onclose = () => {
       setIsConnected(false);
-      setIsRunning(false);
+
+      if (activeRunIdRef.current !== runId) {
+        return;
+      }
+      if (runTerminalRef.current) {
+        setIsRunning(false);
+        setIsReconnecting(false);
+        return;
+      }
+
+      void (async () => {
+        const syncedStatus = await syncRunSnapshot(runId);
+        if (syncedStatus === "completed" || syncedStatus === "failed") {
+          return;
+        }
+
+        const policy = reconnectPolicyRef.current;
+
+        const nextAttempt = reconnectAttemptRef.current + 1;
+        reconnectAttemptRef.current = nextAttempt;
+
+        if (nextAttempt > policy.maxAttempts) {
+          setIsReconnecting(false);
+          setIsRunning(false);
+          setWorkflowState((prev) => ({
+            ...prev,
+            error: "WebSocket 재연결이 반복 실패했습니다. 상태를 확인한 뒤 다시 실행해주세요.",
+          }));
+          addEvent("[ERROR] WebSocket reconnect failed.");
+          return;
+        }
+
+        const delayMs = Math.min(policy.maxDelayMs, policy.baseDelayMs * (2 ** (nextAttempt - 1)));
+        setIsReconnecting(true);
+        addEvent(
+          `[WS] Disconnected. Reconnecting in ${Math.round(delayMs / 1000)}s (${nextAttempt}/${policy.maxAttempts})`,
+        );
+
+        reconnectTimerRef.current = window.setTimeout(() => {
+          if (activeRunIdRef.current !== runId || runTerminalRef.current) {
+            return;
+          }
+          connectNetworkWorkflow(runId, { isRetry: true });
+        }, delayMs);
+      })();
     };
 
     socket.onerror = () => {
       setIsConnected(false);
-      setWorkflowState((prev) => ({
-        ...prev,
-        error: "Network workflow WebSocket 연결 오류가 발생했습니다.",
-      }));
       addEvent("[ERROR] Network workflow socket error.");
     };
 
@@ -586,13 +822,27 @@ export default function Dashboard() {
     const trimmedPrompt = prompt.trim();
     if (!trimmedPrompt) return;
 
+    closeCurrentSocket();
+    activeRunIdRef.current = null;
+    runTerminalRef.current = false;
+    reconnectAttemptRef.current = 0;
     lastNodeRef.current = null;
     setWorkflowState({ ...initialWorkflowState, selected_model: selectedModel });
     setRequestedModelForRun(selectedModel);
     lastModelRef.current = selectedModel;
     agentChatSeenRef.current.clear();
-    setAgentChats([]);
+    setRuntimeTimeline([
+      {
+        id: nextRuntimeId("event"),
+        timeLabel: new Date().toLocaleTimeString("ko-KR", { hour12: false }),
+        category: "event",
+        message: `Run requested (model=${selectedModel})`,
+      },
+    ]);
+    setCurrentClientId(null);
     setActiveAgent("pm");
+    setIsConnected(false);
+    setIsReconnecting(false);
     setIsRunning(true);
 
     try {
@@ -612,14 +862,15 @@ export default function Dashboard() {
       const payload = (await response.json()) as { run_id: string; selected_model?: string };
       const runId = payload.run_id;
       const resolvedModel = payload.selected_model ?? selectedModel;
+      activeRunIdRef.current = runId;
       setCurrentClientId(runId);
       setWorkflowState((prev) => ({ ...prev, selected_model: resolvedModel }));
       lastModelRef.current = resolvedModel;
-      setEventFeed([
-        `[${new Date().toLocaleTimeString("ko-KR", { hour12: false })}] Network session created: ${runId} (requested=${selectedModel}, active=${resolvedModel})`,
-      ]);
+      addEvent(`Network session created: ${runId} (requested=${selectedModel}, active=${resolvedModel})`);
       connectNetworkWorkflow(runId);
     } catch (error) {
+      activeRunIdRef.current = null;
+      runTerminalRef.current = true;
       const message = error instanceof Error ? error.message : "Unknown network start error";
       setIsRunning(false);
       setWorkflowState((prev) => ({ ...prev, error: message }));
@@ -640,7 +891,36 @@ export default function Dashboard() {
   const progressPercent = activeAgent === "idle" ? 0 : Math.round(((stageIndex + 1) / stages.length) * 100);
 
   const sortedFiles = workflowState.source_code ? Object.keys(workflowState.source_code).sort() : [];
+  const normalizedFileFilter = fileFilter.trim().toLowerCase();
+  const visibleFiles = normalizedFileFilter
+    ? sortedFiles.filter((path) => path.toLowerCase().includes(normalizedFileFilter))
+    : sortedFiles;
   const selectedCode = selectedFile && workflowState.source_code ? workflowState.source_code[selectedFile] : "";
+  const normalizedRuntimeSearch = runtimeSearch.trim().toLowerCase();
+  const filteredRuntimeTimeline = runtimeTimeline.filter((item) => {
+    const matchesSearch = normalizedRuntimeSearch
+      ? `${item.timeLabel} ${item.category} ${item.fromRole ?? ""} ${item.toRole ?? ""} ${item.message}`
+        .toLowerCase()
+        .includes(normalizedRuntimeSearch)
+      : true;
+    const matchesRole = runtimeRoleFilter === "all"
+      ? true
+      : runtimeRoleFilter === "event"
+        ? item.category === "event"
+        : item.fromRole === runtimeRoleFilter || item.toRole === runtimeRoleFilter;
+    return matchesSearch && matchesRole;
+  });
+  const timelineChatCount = runtimeTimeline.filter((item) => item.category === "chat").length;
+  const timelineEventCount = runtimeTimeline.length - timelineChatCount;
+  const executionLogText = [
+    workflowState.current_logs ? workflowState.current_logs : "No execution logs yet.",
+    workflowState.qa_report ? workflowState.qa_report : "",
+    workflowState.github_deploy_log ? workflowState.github_deploy_log : "",
+    workflowState.error ? `[ERROR] ${workflowState.error}` : "",
+  ].filter(Boolean).join("\n\n");
+  const filteredExecutionLogLines = normalizedRuntimeSearch
+    ? executionLogText.split("\n").filter((line) => line.toLowerCase().includes(normalizedRuntimeSearch))
+    : executionLogText.split("\n");
   const requestedModelLabel = requestedModelForRun ?? selectedModel;
   const activeModelLabel = workflowState.selected_model ?? selectedModel;
   const isFallbackActive = requestedModelForRun !== null && requestedModelLabel !== activeModelLabel;
@@ -656,9 +936,24 @@ export default function Dashboard() {
   const dlqTotal = orderedQueueInfos.reduce((acc, item) => acc + item.dlq_length, 0);
   const consumerTotal = orderedQueueInfos.reduce((acc, item) => acc + item.group.consumers, 0);
 
-  const statusLabel = isRunning ? (isConnected ? "Live session" : "Connecting") : "Standby";
-  const statusClass = isRunning ? (isConnected ? "tag-teal" : "tag-amber") : "tag-rose";
-  const statusDotClass = isRunning ? (isConnected ? "status-live" : "status-wait") : "status-idle";
+  const statusLabel = !isRunning
+    ? "Standby"
+    : isConnected
+      ? "Live session"
+      : isReconnecting
+        ? "Reconnecting"
+        : "Connecting";
+  const statusClass = !isRunning ? "tag-rose" : isConnected ? "tag-teal" : "tag-amber";
+  const statusDotClass = !isRunning ? "status-idle" : isConnected ? "status-live" : "status-wait";
+  const handleCopySelectedCode = async () => {
+    if (!selectedCode || !selectedFile) return;
+    try {
+      await navigator.clipboard.writeText(selectedCode);
+      setCopiedFilePath(selectedFile);
+    } catch {
+      addEvent("[ERROR] Clipboard copy failed.");
+    }
+  };
 
   return (
     <div className="app-shell">
@@ -731,75 +1026,106 @@ export default function Dashboard() {
             <span className="tag tag-rose mono">updated {lastUpdateAt ?? "-"}</span>
           </div>
 
-          <div className="mt-4 inline-flex items-center gap-1 rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-1">
+          <div className="mt-3 grid gap-2 sm:grid-cols-3 lg:max-w-3xl">
+            <label className="text-[11px] text-[color:var(--text-muted)]">
+              WS 재연결 횟수
+              <input
+                type="number"
+                min={1}
+                max={20}
+                step={1}
+                value={reconnectMaxAttempts}
+                onChange={(event) => {
+                  const parsed = Number(event.target.value);
+                  if (!Number.isFinite(parsed)) return;
+                  setReconnectMaxAttempts(parsed);
+                }}
+                className="mt-1 w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-2 text-xs mono outline-none focus:ring-2 focus:ring-teal-600/30"
+              />
+            </label>
+            <label className="text-[11px] text-[color:var(--text-muted)]">
+              기본 지연(초)
+              <input
+                type="number"
+                min={0.5}
+                max={60}
+                step={0.5}
+                value={reconnectBaseDelaySec}
+                onChange={(event) => {
+                  const parsed = Number(event.target.value);
+                  if (!Number.isFinite(parsed)) return;
+                  setReconnectBaseDelaySec(parsed);
+                }}
+                className="mt-1 w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-2 text-xs mono outline-none focus:ring-2 focus:ring-teal-600/30"
+              />
+            </label>
+            <label className="text-[11px] text-[color:var(--text-muted)]">
+              최대 지연(초)
+              <input
+                type="number"
+                min={1}
+                max={120}
+                step={1}
+                value={reconnectMaxDelaySec}
+                onChange={(event) => {
+                  const parsed = Number(event.target.value);
+                  if (!Number.isFinite(parsed)) return;
+                  setReconnectMaxDelaySec(parsed);
+                }}
+                className="mt-1 w-full rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-2 text-xs mono outline-none focus:ring-2 focus:ring-teal-600/30"
+              />
+            </label>
+          </div>
+          <p className="mt-1 text-[11px] text-[color:var(--text-muted)]">
+            연결 끊김 시 지수 백오프로 재시도합니다. 현재 설정은 즉시 적용됩니다.
+          </p>
+
+          <div className="mt-4 flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setDashboardView("user")}
-              className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
-                dashboardView === "user"
-                  ? "bg-teal-700 text-white"
-                  : "text-[color:var(--text-muted)] hover:bg-[#efe8d8]"
+              onClick={() => setShowOperatorPanel((prev) => !prev)}
+              className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                showOperatorPanel
+                  ? "border-teal-700/35 bg-teal-700 text-white hover:bg-teal-600"
+                  : "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--text-muted)] hover:bg-[#efe8d8]"
               }`}
             >
-              사용자용 (실행/대화)
+              {showOperatorPanel ? "운영 패널 숨기기" : "운영 패널 보기"}
             </button>
-            <button
-              type="button"
-              onClick={() => setDashboardView("operator")}
-              className={`px-3 py-1 text-xs font-semibold rounded-md transition-colors ${
-                dashboardView === "operator"
-                  ? "bg-teal-700 text-white"
-                  : "text-[color:var(--text-muted)] hover:bg-[#efe8d8]"
-              }`}
-            >
-              운영자용 (큐/DLQ)
-            </button>
+            <span className="text-[11px] text-[color:var(--text-muted)]">
+              큐 상태와 DLQ Redrive가 필요할 때만 운영 패널을 펼쳐서 확인합니다.
+            </span>
           </div>
         </section>
 
-        {dashboardView === "user" ? (
-          <section className="grid grid-cols-2 xl:grid-cols-4 gap-3 reveal" style={{ animationDelay: "100ms" }}>
-            <div className="panel p-4">
-              <p className="panel-title">Session</p>
-              <p className="mt-2 mono text-xs break-all">{currentClientId ?? "Not started"}</p>
-            </div>
-            <div className="panel p-4">
-              <p className="panel-title">Active Node</p>
-              <p className="mt-2 text-sm font-semibold">{workflowState.active_node ?? "idle"}</p>
-            </div>
-            <div className="panel p-4">
-              <p className="panel-title">Tokens</p>
-              <p className="mt-2 text-lg font-semibold">{workflowState.total_tokens.toLocaleString()}</p>
-            </div>
-            <div className="panel p-4">
-              <p className="panel-title">Cost</p>
-              <p className="mt-2 text-lg font-semibold">${workflowState.total_cost.toFixed(4)}</p>
-            </div>
-          </section>
-        ) : (
-          <section className="grid grid-cols-2 xl:grid-cols-4 gap-3 reveal" style={{ animationDelay: "100ms" }}>
-            <div className="panel p-4">
-              <p className="panel-title">Queue Group</p>
-              <p className="mt-2 mono text-xs break-all">{queueGroupName}</p>
-            </div>
-            <div className="panel p-4">
-              <p className="panel-title">Consumers</p>
-              <p className="mt-2 text-lg font-semibold">{consumerTotal}</p>
-            </div>
-            <div className="panel p-4">
-              <p className="panel-title">Queue / DLQ</p>
-              <p className="mt-2 text-sm font-semibold">{pendingTotal} / {dlqTotal}</p>
-            </div>
-            <div className="panel p-4">
-              <p className="panel-title">Admin Role</p>
-              <p className="mt-2 text-sm font-semibold">{adminRole}</p>
-            </div>
-          </section>
-        )}
+        <section className="grid grid-cols-2 xl:grid-cols-6 gap-3 reveal" style={{ animationDelay: "100ms" }}>
+          <div className="panel p-4">
+            <p className="panel-title">Session</p>
+            <p className="mt-2 mono text-xs break-all">{currentClientId ?? "Not started"}</p>
+          </div>
+          <div className="panel p-4">
+            <p className="panel-title">Active Node</p>
+            <p className="mt-2 text-sm font-semibold">{workflowState.active_node ?? "idle"}</p>
+          </div>
+          <div className="panel p-4">
+            <p className="panel-title">Tokens</p>
+            <p className="mt-2 text-lg font-semibold">{workflowState.total_tokens.toLocaleString()}</p>
+          </div>
+          <div className="panel p-4">
+            <p className="panel-title">Cost</p>
+            <p className="mt-2 text-lg font-semibold">${workflowState.total_cost.toFixed(4)}</p>
+          </div>
+          <div className="panel p-4">
+            <p className="panel-title">Queue / DLQ</p>
+            <p className="mt-2 text-sm font-semibold">{pendingTotal} / {dlqTotal}</p>
+          </div>
+          <div className="panel p-4">
+            <p className="panel-title">Consumers</p>
+            <p className="mt-2 text-lg font-semibold">{consumerTotal}</p>
+          </div>
+        </section>
 
-        {dashboardView === "user" && (
-          <>
-            <section className="panel p-4 md:p-5 reveal" style={{ animationDelay: "150ms" }}>
+        <section className="panel p-4 md:p-5 reveal" style={{ animationDelay: "150ms" }}>
           <div className="flex items-center justify-between gap-4">
             <p className="panel-title">Pipeline Progress</p>
             <span className="mono text-xs text-[color:var(--text-muted)]">{progressPercent}%</span>
@@ -829,9 +1155,9 @@ export default function Dashboard() {
               </div>
             ))}
           </div>
-            </section>
+        </section>
 
-            <section className="grid gap-5 lg:grid-cols-[0.62fr_1.38fr] reveal" style={{ animationDelay: "200ms" }}>
+        <section className="grid gap-5 lg:grid-cols-[0.62fr_1.38fr] reveal" style={{ animationDelay: "200ms" }}>
           <div className="panel p-4 md:p-5 min-h-[460px]">
             <div className="flex items-center gap-2 pb-3 border-b border-[color:var(--line)]">
               <Terminal className="w-4 h-4" />
@@ -851,95 +1177,158 @@ export default function Dashboard() {
               <Activity className="w-4 h-4" />
               <p className="panel-title">Runtime Feed</p>
             </div>
-            <div className="mt-3 grid gap-3">
-              <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3 h-[160px] overflow-y-auto custom-scrollbar" ref={chatScrollRef}>
-                <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-1">
-                    <MessageCircle className="w-3 h-3" />
-                    <p className="text-[11px] text-[color:var(--text-muted)] font-semibold">Agent Chat Timeline</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      agentChatSeenRef.current.clear();
-                      setAgentChats([]);
-                    }}
-                    className="rounded-md border border-[color:var(--line)] bg-white px-2 py-0.5 text-[10px] mono hover:bg-[#efe8d8]"
-                  >
-                    clear
-                  </button>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <input
+                value={runtimeSearch}
+                onChange={(event) => setRuntimeSearch(event.target.value)}
+                placeholder="Runtime 검색 (chat/event/log)"
+                className="w-full sm:w-64 rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-teal-600/30"
+              />
+              <label className="inline-flex items-center gap-1 rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-1 text-[10px] mono">
+                role
+                <select
+                  value={runtimeRoleFilter}
+                  onChange={(event) => setRuntimeRoleFilter(event.target.value as RuntimeRoleFilter)}
+                  className="rounded border border-[color:var(--line)] bg-white px-1 py-0.5 text-[10px] outline-none"
+                >
+                  <option value="all">all</option>
+                  <option value="event">event-only</option>
+                  {NETWORK_ROLES.map((roleName) => (
+                    <option key={roleName} value={roleName}>
+                      {roleName}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="inline-flex items-center gap-1 rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-1 text-[10px] mono">
+                <input
+                  type="checkbox"
+                  checked={autoScrollTimeline}
+                  onChange={(event) => setAutoScrollTimeline(event.target.checked)}
+                />
+                auto-scroll
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  agentChatSeenRef.current.clear();
+                  setRuntimeTimeline([
+                    {
+                      id: nextRuntimeId("event"),
+                      timeLabel: new Date().toLocaleTimeString("ko-KR", { hour12: false }),
+                      category: "event",
+                      message: "Runtime feed cleared.",
+                    },
+                  ]);
+                }}
+                className="rounded-md border border-[color:var(--line)] bg-white px-2 py-1 text-[10px] mono hover:bg-[#efe8d8]"
+              >
+                clear
+              </button>
+              <span className="text-[11px] text-[color:var(--text-muted)] mono">
+                chat {timelineChatCount} | event {timelineEventCount} | filter {runtimeRoleFilter}
+              </span>
+            </div>
+            <div className="mt-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3 h-[292px] overflow-y-auto custom-scrollbar" ref={timelineScrollRef}>
+              <div className="flex items-center gap-1 mb-2">
+                <MessageCircle className="w-3 h-3" />
+                <p className="text-[11px] text-[color:var(--text-muted)] font-semibold">
+                  Unified Timeline ({filteredRuntimeTimeline.length}/{runtimeTimeline.length})
+                </p>
+              </div>
+              {filteredRuntimeTimeline.length === 0 ? (
+                <p className="text-[11px] mono text-[color:var(--text-muted)]">
+                  {runtimeTimeline.length === 0 ? "No runtime events yet." : "검색 조건과 일치하는 항목이 없습니다."}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {filteredRuntimeTimeline.map((item) => (
+                    <div
+                      key={item.id}
+                      className={`rounded-lg border p-2 ${
+                        item.category === "chat"
+                          ? getRoleTone(item.fromRole ?? "")
+                          : "border-[color:var(--line)] bg-[#f8f2e5] text-[color:var(--text)]"
+                      }`}
+                    >
+                      <p className="mono text-[10px] opacity-75">
+                        {item.category === "chat"
+                          ? `${item.timeLabel} ${item.fromRole ?? "agent"} -> ${item.toRole ?? "supervisor"}`
+                          : `${item.timeLabel} event`}
+                      </p>
+                      <p className="mt-1 text-[11px] whitespace-pre-wrap leading-relaxed">{item.message}</p>
+                    </div>
+                  ))}
                 </div>
-                {agentChats.length === 0 ? (
-                  <p className="text-[11px] mono text-[color:var(--text-muted)]">No agent chat yet.</p>
-                ) : (
-                  <div className="space-y-2">
-                    {agentChats.map((turn) => (
-                      <div key={turn.id} className={`rounded-lg border p-2 ${getRoleTone(turn.fromRole)}`}>
-                        <p className="mono text-[10px] opacity-75">
-                          {turn.timeLabel} {turn.fromRole} -&gt; {turn.toRole}
-                        </p>
-                        <p className="mt-1 text-[11px] whitespace-pre-wrap leading-relaxed">{turn.message}</p>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-              <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3 h-[130px] overflow-y-auto custom-scrollbar">
-                <p className="text-[11px] text-[color:var(--text-muted)] font-semibold mb-2">Events</p>
-                <pre className="whitespace-pre-wrap text-[11px] mono">
-                  {eventFeed.length ? eventFeed.join("\n") : "No events yet."}
-                </pre>
-              </div>
-              <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3 h-[130px] overflow-y-auto custom-scrollbar">
-                <p className="text-[11px] text-[color:var(--text-muted)] font-semibold mb-2">Execution / QA / Deploy</p>
-                <pre className="whitespace-pre-wrap text-[11px] mono">
-                  {workflowState.current_logs ? workflowState.current_logs : "No execution logs yet."}
-                  {workflowState.qa_report ? `\n\n${workflowState.qa_report}` : ""}
-                  {workflowState.github_deploy_log ? `\n\n${workflowState.github_deploy_log}` : ""}
-                  {workflowState.error ? `\n\n[ERROR] ${workflowState.error}` : ""}
-                </pre>
-              </div>
+              )}
+            </div>
+            <div className="mt-3 rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] p-3 h-[130px] overflow-y-auto custom-scrollbar">
+              <p className="text-[11px] text-[color:var(--text-muted)] font-semibold mb-2">Execution / QA / Deploy</p>
+              <pre className="whitespace-pre-wrap text-[11px] mono">
+                {filteredExecutionLogLines.length
+                  ? filteredExecutionLogLines.join("\n")
+                  : "검색 조건과 일치하는 실행 로그가 없습니다."}
+              </pre>
             </div>
           </div>
-            </section>
+        </section>
 
-            <section className="panel p-4 md:p-5 min-h-[460px] reveal" style={{ animationDelay: "240ms" }}>
-              <div className="flex items-center gap-2 pb-3 border-b border-[color:var(--line)]">
-                <FileCode2 className="w-4 h-4" />
-                <p className="panel-title">Source Explorer</p>
-              </div>
-              <div className="mt-3 grid gap-3 md:grid-cols-[180px_1fr] h-[380px]">
-                <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] overflow-y-auto custom-scrollbar">
-                  {sortedFiles.length === 0 ? (
-                    <div className="p-3 text-xs text-[color:var(--text-muted)]">No generated files.</div>
-                  ) : (
-                    sortedFiles.map((path) => (
-                      <button
-                        key={path}
-                        type="button"
-                        onClick={() => setSelectedFile(path)}
-                        className={`w-full text-left px-3 py-2 text-xs mono border-b border-[color:var(--line)] transition-colors ${
-                          selectedFile === path
-                            ? "bg-teal-100 text-teal-800"
-                            : "text-[color:var(--text)] hover:bg-[#efe8d8]"
-                        }`}
-                      >
-                        {path}
-                      </button>
-                    ))
-                  )}
-                </div>
-                <div className="rounded-xl border border-[color:var(--line)] overflow-auto custom-scrollbar soft-code">
-                  <pre className="p-3 text-[11px] whitespace-pre-wrap mono">
-                    {selectedCode || "Select a file to inspect generated code."}
-                  </pre>
-                </div>
-              </div>
-            </section>
-          </>
-        )}
+        <section className="panel p-4 md:p-5 min-h-[460px] reveal" style={{ animationDelay: "240ms" }}>
+          <div className="flex items-center gap-2 pb-3 border-b border-[color:var(--line)]">
+            <FileCode2 className="w-4 h-4" />
+            <p className="panel-title">Source Explorer</p>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <input
+              value={fileFilter}
+              onChange={(event) => setFileFilter(event.target.value)}
+              placeholder="파일 경로 검색"
+              className="w-full sm:w-60 rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2 py-1.5 text-xs mono outline-none focus:ring-2 focus:ring-teal-600/30"
+            />
+            <button
+              type="button"
+              onClick={() => { void handleCopySelectedCode(); }}
+              disabled={!selectedCode}
+              className="rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-55 hover:bg-[#efe8d8]"
+            >
+              {copiedFilePath && copiedFilePath === selectedFile ? "Copied" : "Copy selected"}
+            </button>
+            <span className="text-[11px] text-[color:var(--text-muted)]">
+              {visibleFiles.length}/{sortedFiles.length} files
+            </span>
+          </div>
+          <div className="mt-3 grid gap-3 md:grid-cols-[180px_1fr] h-[380px]">
+            <div className="rounded-xl border border-[color:var(--line)] bg-[color:var(--surface-soft)] overflow-y-auto custom-scrollbar">
+              {sortedFiles.length === 0 ? (
+                <div className="p-3 text-xs text-[color:var(--text-muted)]">No generated files.</div>
+              ) : visibleFiles.length === 0 ? (
+                <div className="p-3 text-xs text-[color:var(--text-muted)]">검색 조건과 일치하는 파일이 없습니다.</div>
+              ) : (
+                visibleFiles.map((path) => (
+                  <button
+                    key={path}
+                    type="button"
+                    onClick={() => setSelectedFile(path)}
+                    className={`w-full text-left px-3 py-2 text-xs mono border-b border-[color:var(--line)] transition-colors ${
+                      selectedFile === path
+                        ? "bg-teal-100 text-teal-800"
+                        : "text-[color:var(--text)] hover:bg-[#efe8d8]"
+                    }`}
+                  >
+                    {path}
+                  </button>
+                ))
+              )}
+            </div>
+            <div className="rounded-xl border border-[color:var(--line)] overflow-auto custom-scrollbar soft-code">
+              <pre className="p-3 text-[11px] whitespace-pre-wrap mono">
+                {selectedCode || "Select a file to inspect generated code."}
+              </pre>
+            </div>
+          </div>
+        </section>
 
-        {dashboardView === "operator" && (
+        {showOperatorPanel && (
           <section className="grid gap-5 xl:grid-cols-12 reveal" style={{ animationDelay: "260ms" }}>
           <div className="panel xl:col-span-7 p-4 md:p-5">
             <div className="flex items-center justify-between gap-3 pb-3 border-b border-[color:var(--line)]">
@@ -1045,7 +1434,13 @@ export default function Dashboard() {
                     <p className="mt-2 text-xs text-rose-700 whitespace-pre-wrap break-words">{summary.error}</p>
                     <button
                       type="button"
-                      onClick={() => { void handleRequeueDlqEntry(entry.entry_id); }}
+                      onClick={() => {
+                        setRequeueCandidate({
+                          entryId: entry.entry_id,
+                          runId: summary.runId,
+                          attemptLabel: `${summary.attempt}/${summary.maxAttempts}`,
+                        });
+                      }}
                       disabled={redriveEntryId === entry.entry_id}
                       className="mt-3 inline-flex items-center gap-2 rounded-lg border border-teal-700/35 bg-teal-700 text-white px-3 py-1.5 text-xs font-semibold disabled:opacity-60 hover:bg-teal-600"
                     >
@@ -1058,6 +1453,45 @@ export default function Dashboard() {
             </div>
           </div>
           </section>
+        )}
+
+        {requeueCandidate && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/35 p-4">
+            <div className="w-full max-w-md rounded-lg border border-[color:var(--line)] bg-[color:var(--surface)] p-4 shadow-xl">
+              <p className="panel-title">Confirm DLQ Requeue</p>
+              <p className="mt-3 text-sm text-[color:var(--text)]">
+                아래 항목을 다시 큐에 넣을까요?
+              </p>
+              <div className="mt-3 space-y-1 text-xs text-[color:var(--text-muted)] mono">
+                <p>entry {requeueCandidate.entryId}</p>
+                <p>run {requeueCandidate.runId}</p>
+                <p>attempt {requeueCandidate.attemptLabel}</p>
+                <p>source {adminRole}</p>
+                <p>target {redriveTargetRole}</p>
+              </div>
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setRequeueCandidate(null)}
+                  className="rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-2 text-xs font-semibold hover:bg-[#ece4d4]"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const entryId = requeueCandidate.entryId;
+                    setRequeueCandidate(null);
+                    void handleRequeueDlqEntry(entryId);
+                  }}
+                  disabled={redriveEntryId === requeueCandidate.entryId}
+                  className="rounded-lg border border-teal-700/35 bg-teal-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-60 hover:bg-teal-600"
+                >
+                  {redriveEntryId === requeueCandidate.entryId ? "Requeueing..." : "Confirm Requeue"}
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </div>
     </div>
