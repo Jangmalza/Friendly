@@ -51,6 +51,7 @@
             font-weight: 700;
             margin: 0 0 8px 0;
             background: linear-gradient(to right, #818cf8, #c084fc);
+            background-clip: text;
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
         }
@@ -139,7 +140,7 @@
 
         .workflow-stage {
             display: grid;
-            grid-template-columns: repeat(5, 1fr);
+            grid-template-columns: repeat(6, 1fr);
             gap: 16px;
             margin-top: 8px;
         }
@@ -354,6 +355,11 @@
             color: #a78bfa;
         }
 
+        .badge-github_deploy {
+            background: rgba(14, 165, 233, 0.15);
+            color: #38bdf8;
+        }
+
         .log-content {
             color: #d1d5db;
             white-space: pre-wrap;
@@ -413,6 +419,119 @@
 
         ::-webkit-scrollbar-thumb:hover {
             background: rgba(255, 255, 255, 0.2);
+        }
+
+        /* Modal Styles for Human-in-the-Loop */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(4px);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .modal-content {
+            background: #1e1e20;
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            width: 90%;
+            max-width: 800px;
+            max-height: 90vh;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+            animation: modalFadeIn 0.3s ease-out;
+        }
+
+        @keyframes modalFadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(20px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .modal-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--panel-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .modal-header h2 {
+            margin: 0;
+            font-size: 20px;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .modal-badge {
+            background: rgba(245, 158, 11, 0.15);
+            color: #fbbf24;
+            font-size: 12px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-weight: 600;
+        }
+
+        .modal-body {
+            padding: 24px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .modal-textarea {
+            width: 100%;
+            background: #131417;
+            border: 1px solid var(--panel-border);
+            color: #e5e7eb;
+            border-radius: 8px;
+            padding: 16px;
+            font-family: 'Consolas', monospace;
+            font-size: 13px;
+            line-height: 1.6;
+            min-height: 250px;
+            resize: vertical;
+            box-sizing: border-box;
+            outline: none;
+        }
+
+        .modal-textarea:focus {
+            border-color: var(--primary);
+        }
+
+        .modal-footer {
+            padding: 20px 24px;
+            border-top: 1px solid var(--panel-border);
+            display: flex;
+            justify-content: flex-end;
+            gap: 12px;
+        }
+
+        .btn-outline {
+            background: transparent;
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+        }
+
+        .btn-outline:hover {
+            background: rgba(255, 255, 255, 0.05);
+            border-color: var(--text-muted);
         }
     </style>
 </head>
@@ -475,35 +594,110 @@
                     <span class="agent-status-text">Pending</span>
                 </div>
             </div>
+            <div class="agent-card" id="agent-github_deploy_node">
+                <div class="agent-icon">CD</div>
+                <div class="agent-info">
+                    <span class="agent-role">Auto Deploy</span>
+                    <span class="agent-status-text">Pending</span>
+                </div>
+            </div>
         </div>
 
-        <div class="terminal-container">
-            <div class="terminal-header">
-                <div class="mac-btns">
-                    <div class="mac-btn close"></div>
-                    <div class="mac-btn min"></div>
-                    <div class="mac-btn max"></div>
+        <div class="workspace-container" style="display: flex; gap: 16px; height: 500px;">
+            <!-- Left Pane: Terminal Logs -->
+            <div class="terminal-container" style="flex: 1; min-width: 0; display: flex; flex-direction: column;">
+                <div class="terminal-header">
+                    <div class="mac-btns">
+                        <div class="mac-btn close"></div>
+                        <div class="mac-btn min"></div>
+                        <div class="mac-btn max"></div>
+                    </div>
+                    <div class="terminal-title">orchestrator_logs ~ zsh</div>
                 </div>
-                <div class="terminal-title">orchestrator_logs ~ zsh</div>
+                <div class="terminal-body" id="outputArea">
+                    <div class="log-item">
+                        <div class="log-header"><span class="log-badge badge-system">SYSTEM</span></div>
+                        <div class="log-content">System initialized. Awaiting user instruction...</div>
+                    </div>
+                </div>
             </div>
-            <div class="terminal-body" id="outputArea">
-                <div class="log-item">
-                    <div class="log-header"><span class="log-badge badge-system">SYSTEM</span></div>
-                    <div class="log-content">System initialized. Awaiting user instruction...</div>
+
+            <!-- Right Pane: Code Editor view -->
+            <div class="editor-container"
+                style="flex: 1; min-width: 0; background: #1e1e1e; border: 1px solid var(--panel-border); border-radius: 12px; display: flex; overflow: hidden;">
+                <!-- File Explorer Sidebar -->
+                <div
+                    style="width: 200px; background: #252526; border-right: 1px solid #333; display: flex; flex-direction: column;">
+                    <div
+                        style="padding: 10px 15px; font-size: 11px; font-weight: 600; color: #ccc; letter-spacing: 1px; text-transform: uppercase;">
+                        Explorer</div>
+                    <div id="fileExplorer" style="flex: 1; overflow-y: auto; padding: 10px 0;">
+                        <div style="padding: 10px 15px; font-size: 13px; color: #666; font-style: italic;">No files
+                            generated yet.</div>
+                    </div>
                 </div>
+                <!-- Monaco Editor Component -->
+                <div id="monacoEditor" style="flex: 1; width: 100%; height: 100%;"></div>
             </div>
         </div>
     </div>
 
+    <!-- Human-in-the-Loop Review Modal -->
+    <div class="modal-overlay" id="reviewModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Plan Review <span class="modal-badge">ACTION REQUIRED</span></h2>
+            </div>
+            <div class="modal-body">
+                <p style="margin: 0; color: var(--text-muted); font-size: 14px;">
+                    The Architect has finished the system design. Please review and modify the specifications below
+                    before the Developer starts coding.
+                </p>
+                <textarea class="modal-textarea" id="reviewTextarea"></textarea>
+            </div>
+            <div class="modal-footer">
+                <button class="btn-outline" onclick="submitFeedback('reject')">Cancel Workflow</button>
+                <button onclick="submitFeedback('approve')">Approve & Continue</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Load Monaco Editor -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.6/require.min.js"></script>
     <script>
         let ws;
+        let activeClientId = null;
+        let currentPmSpec = "";
+        let currentArchSpec = "";
+
+        // Monaco Editor Setup
+        let editor;
+        let fileCache = {};
+
+        require.config({ paths: { 'vs': 'https://cdnjs.cloudflare.com/ajax/libs/monaco-editor/0.40.0/min/vs' } });
+        require(['vs/editor/editor.main'], function () {
+            editor = monaco.editor.create(document.getElementById('monacoEditor'), {
+                value: "// Welcome to AI Orchestrator Code Viewer\n// Generated code will appear here automatically.",
+                language: 'javascript',
+                theme: 'vs-dark',
+                readOnly: true,
+                minimap: { enabled: false },
+                scrollBeyondLastLine: false,
+                fontSize: 13,
+                fontFamily: "'Consolas', monospace"
+            });
+
+            // Handle resize for the split pane
+            window.addEventListener('resize', () => editor.layout());
+        });
 
         const agentStatusMessages = {
             'pm_node': 'Drafting PRD...',
             'architect_node': 'Designing Architecture...',
             'developer_node': 'Writing Code...',
             'tool_execution_node': 'Sandbox Validation...',
-            'qa_node': 'Inspecting Code...'
+            'qa_node': 'Inspecting Code...',
+            'github_deploy_node': 'Pushing to GitHub...'
         };
 
         function startOrchestration() {
@@ -525,6 +719,7 @@
             addLog('system', 'Workflow execution initiated. Connecting to orchestration engine...');
 
             const clientId = Math.random().toString(36).substring(7);
+            activeClientId = clientId;
             const host = window.location.hostname || "127.0.0.1";
             ws = new WebSocket(`ws://${host}:8000/ws/orchestration/${clientId}`);
 
@@ -552,6 +747,15 @@
                     return;
                 }
 
+                if (response.status === "WAITING_FOR_USER") {
+                    addLog('system', '[PAUSED] Workflow paused. Waiting for manual user review & approval of the Architecture Plan.');
+                    document.getElementById('reviewTextarea').value = currentArchSpec || currentPmSpec;
+                    document.getElementById('reviewModal').style.display = 'flex';
+                    // We keep the WS open to receive the rest of the stream later, 
+                    // though the server currently closes it. The resume endpoint will restart it if needed.
+                    return;
+                }
+
                 if (response.status === "ERROR" || response.error) {
                     addLog('system', `[ERROR] Pipeline failed: ${response.message || response.error}`);
                     resetAgents();
@@ -567,11 +771,15 @@
                     let logContent = "";
 
                     if (active_agent === 'pm_node' && response.pm_spec) {
+                        currentPmSpec = response.pm_spec;
                         logContent = response.pm_spec;
                     } else if (active_agent === 'architect_node' && response.architecture_spec) {
+                        currentArchSpec = response.architecture_spec;
                         logContent = response.architecture_spec;
                     } else if (active_agent === 'developer_node' && response.source_code) {
-                        logContent = "Artifacts Generated:\n" + JSON.stringify(response.source_code, null, 2);
+                        // Populate file explorer and Monaco 
+                        renderFileTree(response.source_code);
+                        logContent = "[Developer] Code generation completed successfully. Check the right pane.";
                     } else if (active_agent === 'tool_execution_node' && response.current_logs) {
                         logContent = response.current_logs;
                     } else if (active_agent === 'qa_node' && response.qa_report) {
@@ -579,6 +787,8 @@
                         if (response.qa_report.includes("STATUS: FAIL")) {
                             logContent += "\n\n[WARNING] QA rejected the build. Reverting to Development node.";
                         }
+                    } else if (active_agent === 'github_deploy_node' && response.github_deploy_log) {
+                        logContent = response.github_deploy_log;
                     }
 
                     if (logContent) {
@@ -656,6 +866,165 @@
 
             // Auto-scroll to bottom
             outputArea.scrollTop = outputArea.scrollHeight;
+        }
+
+        async function submitFeedback(action) {
+            document.getElementById('reviewModal').style.display = 'none';
+
+            if (action === 'reject') {
+                addLog('system', 'Workflow cancelled by user during review phase.');
+                resetAgents();
+                document.getElementById('sendBtn').disabled = false;
+                document.getElementById('sendBtn').querySelector('.btn-text').innerText = "Execute Workflow";
+                if (ws) ws.close();
+                return;
+            }
+
+            // User Approved (possibly with edits)
+            const modifiedSpec = document.getElementById('reviewTextarea').value;
+            addLog('system', 'User approved the requirements. Resuming workflow engine...');
+
+            // Re-activate developer node UI
+            activateAgent('developer_node');
+
+            const host = window.location.hostname || "127.0.0.1";
+            try {
+                // Call the /api/resume REST endpoint
+                const res = await fetch(`http://${host}:8000/api/resume`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        client_id: activeClientId,
+                        architecture_document: modifiedSpec
+                    })
+                });
+
+                if (!res.ok) throw new Error("Failed to resume workflow");
+
+                // Once resumed, we need to reconnect WebSocket to see the rest of the stream.
+                // Normally the backend would keep emitting or allow reconnection to the same thread.
+                // To keep it simple, we listen to the new stream on the same client ID.
+                connectToExistingWorkflow(activeClientId);
+
+            } catch (err) {
+                addLog('system', `[ERROR] Failed to resume: ${err.message}`);
+                document.getElementById('sendBtn').disabled = false;
+                document.getElementById('sendBtn').querySelector('.btn-text').innerText = "Execute Workflow";
+            }
+        }
+
+        function connectToExistingWorkflow(clientId) {
+            const host = window.location.hostname || "127.0.0.1";
+            ws = new WebSocket(`ws://${host}:8000/ws/orchestration/${clientId}?resume=true`);
+
+            ws.onopen = function () {
+                addLog('system', 'Reconnected to execution thread. Continuing pipeline...');
+            };
+
+            // Re-assign the exactly same exactly same onmessage logic
+            ws.onmessage = function (event) {
+                const response = JSON.parse(event.data);
+
+                if (response.total_tokens !== undefined) {
+                    document.getElementById('tokenCount').innerText = `Tokens: ${response.total_tokens.toLocaleString()}`;
+                }
+                if (response.total_cost !== undefined) {
+                    document.getElementById('costCount').innerText = `Cost: $${response.total_cost.toFixed(4)}`;
+                }
+
+                if (response.status === "ALL_DONE" || response.status === "completed") {
+                    addLog('system', 'Workflow execution completed successfully. Pipeline terminated.');
+                    finalizeAgents();
+                    document.getElementById('sendBtn').disabled = false;
+                    document.getElementById('sendBtn').querySelector('.btn-text').innerText = "Execute Workflow";
+                    ws.close();
+                    return;
+                }
+
+                if (response.status === "ERROR" || response.error) {
+                    addLog('system', `[ERROR] Pipeline failed: ${response.message || response.error}`);
+                    resetAgents();
+                    document.getElementById('sendBtn').disabled = false;
+                    document.getElementById('sendBtn').querySelector('.btn-text').innerText = "Execute Workflow";
+                    return;
+                }
+
+                if (response.active_node) {
+                    activateAgent(response.active_node);
+                    let logContent = "";
+                    if (response.active_node === 'developer_node' && response.source_code) {
+                        renderFileTree(response.source_code);
+                        logContent = "[Developer] Code generation completed successfully. Check the right pane.";
+                    } else if (response.active_node === 'tool_execution_node' && response.current_logs) {
+                        logContent = response.current_logs;
+                    } else if (response.active_node === 'qa_node' && response.qa_report) {
+                        logContent = response.qa_report;
+                    } else if (response.active_node === 'github_deploy_node') {
+                        // handled differently if needed
+                    }
+                    if (logContent) addLog(response.active_node.replace('_node', ''), logContent);
+                }
+            };
+        }
+
+        function renderFileTree(sourceCodeDict) {
+            const explorer = document.getElementById('fileExplorer');
+            explorer.innerHTML = '';
+            fileCache = sourceCodeDict;
+
+            const filePaths = Object.keys(sourceCodeDict).sort();
+            if (filePaths.length === 0) {
+                explorer.innerHTML = '<div style="padding: 10px 15px; font-size: 13px; color: #666; font-style: italic;">No files found.</div>';
+                return;
+            }
+
+            let isFirst = true;
+
+            filePaths.forEach(path => {
+                const item = document.createElement('div');
+                item.style.padding = '8px 15px';
+                item.style.fontSize = '13px';
+                item.style.color = '#ccc';
+                item.style.cursor = 'pointer';
+                item.style.whiteSpace = 'nowrap';
+                item.style.overflow = 'hidden';
+                item.style.textOverflow = 'ellipsis';
+                item.style.display = 'flex';
+                item.style.alignItems = 'center';
+                item.style.gap = '8px';
+
+                // File icon mock
+                item.innerHTML = `📄 <span>${path}</span>`;
+
+                item.onmouseenter = () => { item.style.background = '#2a2d2e'; item.style.color = '#fff'; };
+                item.onmouseleave = () => { item.style.background = 'transparent'; item.style.color = '#ccc'; };
+
+                item.onclick = () => {
+                    const content = sourceCodeDict[path];
+
+                    // Determine syntax language from extension
+                    let lang = 'javascript';
+                    if (path.endsWith('.py')) lang = 'python';
+                    else if (path.endsWith('.html')) lang = 'html';
+                    else if (path.endsWith('.css')) lang = 'css';
+                    else if (path.endsWith('.json')) lang = 'json';
+                    else if (path.endsWith('.md')) lang = 'markdown';
+                    else if (path.endsWith('.sh')) lang = 'shell';
+
+                    if (editor) {
+                        monaco.editor.setModelLanguage(editor.getModel(), lang);
+                        editor.setValue(content);
+                    }
+                };
+
+                explorer.appendChild(item);
+
+                // Auto-load first file into editor
+                if (isFirst && editor) {
+                    item.onclick();
+                    isFirst = false;
+                }
+            });
         }
     </script>
 

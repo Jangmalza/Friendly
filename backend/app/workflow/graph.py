@@ -2,7 +2,7 @@ from langgraph.graph import StateGraph, END
 from typing import Literal
 
 from .state import AgentState
-from .nodes import pm_node, architect_node, developer_node, tool_execution_node, qa_node
+from .nodes import pm_node, architect_node, developer_node, tool_execution_node, qa_node, github_deploy_node
 
 def qa_router(state: AgentState):
     qa_report = state.get("qa_report", "")
@@ -15,7 +15,7 @@ def qa_router(state: AgentState):
 
     # QA 리포트에서 상태 코드 분석
     if "STATUS: PASS" in qa_report:
-        return "end"
+        return "github_deploy_node"
     elif "STATUS: FAIL" in qa_report:
         return "developer_node"
     else:
@@ -31,6 +31,7 @@ workflow.add_node("architect_node", architect_node)
 workflow.add_node("developer_node", developer_node)
 workflow.add_node("tool_execution_node", tool_execution_node)
 workflow.add_node("qa_node", qa_node)
+workflow.add_node("github_deploy_node", github_deploy_node)
 
 # 3. 진입점 설정
 workflow.set_entry_point("pm_node")
@@ -40,6 +41,7 @@ workflow.add_edge("pm_node", "architect_node")
 workflow.add_edge("architect_node", "developer_node")
 workflow.add_edge("developer_node", "tool_execution_node")
 workflow.add_edge("tool_execution_node", "qa_node")
+workflow.add_edge("github_deploy_node", END)
 
 # 5. 조건부 엣지 연결 (QA 결과에 따른 분기)
 workflow.add_conditional_edges(
@@ -48,9 +50,16 @@ workflow.add_conditional_edges(
     {
         # 라우터 함수의 반환값에 따라 이동할 실제 노드 매핑
         "developer_node": "developer_node",
+        "github_deploy_node": "github_deploy_node",
         "end": END
     }
 )
 
-# 6. 그래프 컴파일
-agent_graph = workflow.compile()
+# 6. checkpointer 추가하여 Human-in-the-Loop 적용 (개발 요정 전 일시정지)
+from langgraph.checkpoint.memory import MemorySaver
+
+memory = MemorySaver()
+agent_graph = workflow.compile(
+    checkpointer=memory,
+    interrupt_before=["developer_node"]
+)
