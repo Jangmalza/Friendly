@@ -542,8 +542,11 @@ export default function Dashboard() {
   }, [copiedFilePath]);
 
   useEffect(() => {
-    if (!isNetworkRole(workflowState.approval_stage)) return;
-    setApprovalRejectRole(workflowState.approval_stage);
+    if (isNetworkRole(workflowState.approval_stage)) {
+      setApprovalRejectRole(workflowState.approval_stage);
+      return;
+    }
+    setApprovalRejectRole("pm");
   }, [workflowState.approval_stage]);
 
   useEffect(() => {
@@ -1100,6 +1103,9 @@ export default function Dashboard() {
   const approvalPendingRolesLabel = workflowState.approval_pending_next_roles.length > 0
     ? workflowState.approval_pending_next_roles.join(", ")
     : "-";
+  const approvalRejectRoleOptions: NetworkRole[] = isNetworkRole(workflowState.approval_stage)
+    ? [workflowState.approval_stage]
+    : ["pm"];
 
   const waitingApproval = workflowState.status === "waiting_approval";
   const statusLabel = waitingApproval
@@ -1217,7 +1223,7 @@ export default function Dashboard() {
                     disabled={approvalBusyAction !== null}
                     className="mt-1 w-full rounded-md border border-amber-400/35 bg-[#1b2737] px-2 py-1.5 text-xs mono outline-none focus:ring-2 focus:ring-amber-500/30 disabled:opacity-60"
                   >
-                    {NETWORK_ROLES.map((roleName) => (
+                    {approvalRejectRoleOptions.map((roleName) => (
                       <option key={roleName} value={roleName}>
                         {roleName}
                       </option>

@@ -474,7 +474,7 @@ class DistributedWorker:
         if state is None:
             return
 
-        if state.get("status") in {"completed", "failed"}:
+        if state.get("status") in {"completed", "failed", "waiting_approval"}:
             return
 
         expected_role = state.get("next_role")

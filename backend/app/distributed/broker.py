@@ -55,6 +55,10 @@ class RedisStreamBroker:
     def parallel_merge_gate_key(run_id: str, phase: str) -> str:
         return f"run:{run_id}:parallel:{phase}:merge_gate"
 
+    @staticmethod
+    def approval_decision_lock_key(run_id: str) -> str:
+        return f"run:{run_id}:approval:decision_lock"
+
     async def save_state(self, run_id: str, state: Dict[str, Any]) -> None:
         client = await self.client()
         payload = json.dumps(to_jsonable(state), ensure_ascii=False)
@@ -189,6 +193,18 @@ class RedisStreamBroker:
         if not delete_keys:
             return 0
         return int(await client.delete(*delete_keys))
+
+    async def try_acquire_approval_decision(self, run_id: str, *, ttl_sec: int = 30) -> bool:
+        client = await self.client()
+        key = self.approval_decision_lock_key(run_id)
+        timeout = max(1, int(ttl_sec))
+        acquired = await client.set(key, "1", nx=True, ex=timeout)
+        return bool(acquired)
+
+    async def release_approval_decision(self, run_id: str) -> int:
+        client = await self.client()
+        key = self.approval_decision_lock_key(run_id)
+        return int(await client.delete(key))
 
     async def read_tasks(
         self,

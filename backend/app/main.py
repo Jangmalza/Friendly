@@ -176,6 +176,32 @@ def _clear_approval_context(state: Dict[str, Any]) -> None:
     state["approval_pending_next_roles"] = []
 
 
+def _resolve_reject_target_role(approval_stage: Optional[str], requested_role: Optional[str]) -> str:
+    if approval_stage:
+        normalized_requested = (requested_role or "").strip()
+        if normalized_requested and normalized_requested != approval_stage:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"reject_to_role must be '{approval_stage}' for approval_stage='{approval_stage}'. "
+                    "Cross-stage reroute is not allowed."
+                ),
+            )
+        return approval_stage
+
+    normalized_requested = (requested_role or "").strip()
+    if not normalized_requested:
+        raise HTTPException(status_code=400, detail="reject_to_role is required when approval_stage is missing")
+
+    resolved = _resolve_network_role(normalized_requested)
+    if resolved != "pm":
+        raise HTTPException(
+            status_code=400,
+            detail="For legacy runs without approval_stage, reject_to_role must be 'pm'.",
+        )
+    return resolved
+
+
 @app.post("/api/network/start")
 async def start_network_workflow(req: NetworkStartRequest):
     prompt = (req.prompt or "").strip()
@@ -237,67 +263,131 @@ async def decide_network_run_approval(run_id: str, req: ApprovalDecisionRequest)
     state = await network_broker.load_state(run_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Run not found")
+    acquired = await network_broker.try_acquire_approval_decision(run_id, ttl_sec=30)
+    if not acquired:
+        raise HTTPException(status_code=409, detail="Another approval decision is in progress for this run")
 
-    current_status = str(state.get("status") or "").strip().lower()
-    if current_status != "waiting_approval":
-        raise HTTPException(
-            status_code=409,
-            detail=f"Run is not waiting for approval. current_status={state.get('status', 'unknown')}",
-        )
+    try:
+        # Reload state inside lock to avoid stale approval decisions.
+        state = await network_broker.load_state(run_id)
+        if state is None:
+            raise HTTPException(status_code=404, detail="Run not found")
 
-    action = (req.action or "").strip().lower()
-    if action not in {"approve", "reject"}:
-        raise HTTPException(status_code=400, detail="action must be one of: approve, reject")
-
-    approval_stage_raw = str(state.get("approval_stage") or "").strip()
-    approval_stage = approval_stage_raw if approval_stage_raw in NETWORK_ROLES else None
-    pending_next_roles = _normalize_pending_next_roles(state.get("approval_pending_next_roles"))
-
-    actor = (req.actor or "").strip() or "director"
-    note = (req.note or "").strip()
-    decided_at = now_iso()
-
-    state["approval_last_action"] = action
-    state["approval_last_stage"] = approval_stage
-    state["approval_last_actor"] = actor
-    state["approval_last_note"] = note
-    state["approval_last_decision_at"] = decided_at
-
-    if action == "approve":
-        if not pending_next_roles:
-            raise HTTPException(status_code=400, detail="No pending next roles found for approval routing")
-
-        _clear_approval_context(state)
-        state["updated_at"] = now_iso()
-
-        note_suffix = f" note={note}" if note else ""
-        if len(pending_next_roles) > 1:
-            state["status"] = "running"
-            state["next_role"] = "parallel_wait"
-            state["parallel_phase"] = PARALLEL_DEVELOPMENT_PHASE
-            state["parallel_expected_roles"] = pending_next_roles
-            state["parallel_completed_roles"] = []
-
-            await network_broker.save_state(run_id, state)
-            await network_broker.reset_parallel_phase(
-                run_id,
-                PARALLEL_DEVELOPMENT_PHASE,
-                roles=pending_next_roles,
-                clear_candidates=True,
+        current_status = str(state.get("status") or "").strip().lower()
+        if current_status != "waiting_approval":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Run is not waiting for approval. current_status={state.get('status', 'unknown')}",
             )
+
+        action = (req.action or "").strip().lower()
+        if action not in {"approve", "reject"}:
+            raise HTTPException(status_code=400, detail="action must be one of: approve, reject")
+
+        approval_stage_raw = str(state.get("approval_stage") or "").strip()
+        approval_stage = approval_stage_raw if approval_stage_raw in NETWORK_ROLES else None
+        pending_next_roles = _normalize_pending_next_roles(state.get("approval_pending_next_roles"))
+
+        actor = (req.actor or "").strip() or "director"
+        note = (req.note or "").strip()
+        decided_at = now_iso()
+
+        state["approval_last_action"] = action
+        state["approval_last_stage"] = approval_stage
+        state["approval_last_actor"] = actor
+        state["approval_last_note"] = note
+        state["approval_last_decision_at"] = decided_at
+
+        if action == "approve":
+            if not pending_next_roles:
+                raise HTTPException(status_code=400, detail="No pending next roles found for approval routing")
+
+            _clear_approval_context(state)
+            state["updated_at"] = now_iso()
+
+            note_suffix = f" note={note}" if note else ""
+            if len(pending_next_roles) > 1:
+                state["status"] = "running"
+                state["next_role"] = "parallel_wait"
+                state["parallel_phase"] = PARALLEL_DEVELOPMENT_PHASE
+                state["parallel_expected_roles"] = pending_next_roles
+                state["parallel_completed_roles"] = []
+
+                await network_broker.save_state(run_id, state)
+                await network_broker.reset_parallel_phase(
+                    run_id,
+                    PARALLEL_DEVELOPMENT_PHASE,
+                    roles=pending_next_roles,
+                    clear_candidates=True,
+                )
+
+                await network_broker.append_event(
+                    run_id,
+                    build_safe_event(
+                        run_id,
+                        state,
+                        status="running",
+                        from_role=actor,
+                        to_role="parallel_wait",
+                        event_type="workflow_status",
+                        note=(
+                            f"[approval] approved stage={approval_stage or '-'}; "
+                            f"parallel fan-out started: {', '.join(pending_next_roles)}.{note_suffix}"
+                        ),
+                    ),
+                )
+                await network_broker.append_event(
+                    run_id,
+                    build_safe_event(
+                        run_id,
+                        state,
+                        status="running",
+                        from_role=actor,
+                        to_role="parallel_wait",
+                        event_type="agent_chat",
+                        note=(
+                            f"@parallel-team 승인 완료. 다음 역할: {', '.join(pending_next_roles)}."
+                            f"{(' 코멘트: ' + note) if note else ''}"
+                        ),
+                    ),
+                )
+
+                for role_name in pending_next_roles:
+                    await network_broker.send_task(
+                        role_name,
+                        {
+                            "run_id": run_id,
+                            "from_role": actor,
+                            "queued_at": now_iso(),
+                            "_attempt": 1,
+                        },
+                    )
+
+                return {
+                    "run_id": run_id,
+                    "action": action,
+                    "status": state["status"],
+                    "next_role": state["next_role"],
+                    "next_roles": pending_next_roles,
+                }
+
+            next_role = pending_next_roles[0]
+            state["status"] = "queued"
+            state["next_role"] = next_role
+            await network_broker.save_state(run_id, state)
 
             await network_broker.append_event(
                 run_id,
                 build_safe_event(
                     run_id,
                     state,
-                    status="running",
+                    status="queued",
                     from_role=actor,
-                    to_role="parallel_wait",
+                    to_role=next_role,
                     event_type="workflow_status",
                     note=(
                         f"[approval] approved stage={approval_stage or '-'}; "
-                        f"parallel fan-out started: {', '.join(pending_next_roles)}.{note_suffix}"
+                        f"routed to {next_role}.{note_suffix}"
                     ),
                 ),
             )
@@ -306,41 +396,46 @@ async def decide_network_run_approval(run_id: str, req: ApprovalDecisionRequest)
                 build_safe_event(
                     run_id,
                     state,
-                    status="running",
+                    status="queued",
                     from_role=actor,
-                    to_role="parallel_wait",
+                    to_role=next_role,
                     event_type="agent_chat",
                     note=(
-                        f"@parallel-team 승인 완료. 다음 역할: {', '.join(pending_next_roles)}."
+                        f"@{next_role} 디렉터 승인으로 작업 재개합니다."
                         f"{(' 코멘트: ' + note) if note else ''}"
                     ),
                 ),
             )
 
-            for role_name in pending_next_roles:
-                await network_broker.send_task(
-                    role_name,
-                    {
-                        "run_id": run_id,
-                        "from_role": actor,
-                        "queued_at": now_iso(),
-                        "_attempt": 1,
-                    },
-                )
-
+            task_entry_id = await network_broker.send_task(
+                next_role,
+                {
+                    "run_id": run_id,
+                    "from_role": actor,
+                    "queued_at": now_iso(),
+                    "_attempt": 1,
+                },
+            )
             return {
                 "run_id": run_id,
                 "action": action,
                 "status": state["status"],
-                "next_role": state["next_role"],
-                "next_roles": pending_next_roles,
+                "next_role": next_role,
+                "task_entry_id": task_entry_id,
             }
 
-        next_role = pending_next_roles[0]
+        target_role = _resolve_reject_target_role(approval_stage, req.reject_to_role)
+
+        _clear_approval_context(state)
         state["status"] = "queued"
-        state["next_role"] = next_role
+        state["next_role"] = target_role
+        state["parallel_phase"] = None
+        state["parallel_expected_roles"] = []
+        state["parallel_completed_roles"] = []
+        state["updated_at"] = now_iso()
         await network_broker.save_state(run_id, state)
 
+        note_suffix = f" note={note}" if note else ""
         await network_broker.append_event(
             run_id,
             build_safe_event(
@@ -348,11 +443,11 @@ async def decide_network_run_approval(run_id: str, req: ApprovalDecisionRequest)
                 state,
                 status="queued",
                 from_role=actor,
-                to_role=next_role,
+                to_role=target_role,
                 event_type="workflow_status",
                 note=(
-                    f"[approval] approved stage={approval_stage or '-'}; "
-                    f"routed to {next_role}.{note_suffix}"
+                    f"[approval] rejected stage={approval_stage or '-'}; "
+                    f"rerouted to {target_role}.{note_suffix}"
                 ),
             ),
         )
@@ -363,17 +458,17 @@ async def decide_network_run_approval(run_id: str, req: ApprovalDecisionRequest)
                 state,
                 status="queued",
                 from_role=actor,
-                to_role=next_role,
+                to_role=target_role,
                 event_type="agent_chat",
                 note=(
-                    f"@{next_role} 디렉터 승인으로 작업 재개합니다."
+                    f"@{target_role} 디렉터 반려로 재작업을 요청합니다."
                     f"{(' 코멘트: ' + note) if note else ''}"
                 ),
             ),
         )
 
         task_entry_id = await network_broker.send_task(
-            next_role,
+            target_role,
             {
                 "run_id": run_id,
                 "from_role": actor,
@@ -385,72 +480,11 @@ async def decide_network_run_approval(run_id: str, req: ApprovalDecisionRequest)
             "run_id": run_id,
             "action": action,
             "status": state["status"],
-            "next_role": next_role,
+            "next_role": target_role,
             "task_entry_id": task_entry_id,
         }
-
-    target_role_candidate = req.reject_to_role or approval_stage
-    if not target_role_candidate:
-        raise HTTPException(status_code=400, detail="reject_to_role is required when approval_stage is missing")
-    target_role = _resolve_network_role(target_role_candidate)
-
-    _clear_approval_context(state)
-    state["status"] = "queued"
-    state["next_role"] = target_role
-    state["parallel_phase"] = None
-    state["parallel_expected_roles"] = []
-    state["parallel_completed_roles"] = []
-    state["updated_at"] = now_iso()
-    await network_broker.save_state(run_id, state)
-
-    note_suffix = f" note={note}" if note else ""
-    await network_broker.append_event(
-        run_id,
-        build_safe_event(
-            run_id,
-            state,
-            status="queued",
-            from_role=actor,
-            to_role=target_role,
-            event_type="workflow_status",
-            note=(
-                f"[approval] rejected stage={approval_stage or '-'}; "
-                f"rerouted to {target_role}.{note_suffix}"
-            ),
-        ),
-    )
-    await network_broker.append_event(
-        run_id,
-        build_safe_event(
-            run_id,
-            state,
-            status="queued",
-            from_role=actor,
-            to_role=target_role,
-            event_type="agent_chat",
-            note=(
-                f"@{target_role} 디렉터 반려로 재작업을 요청합니다."
-                f"{(' 코멘트: ' + note) if note else ''}"
-            ),
-        ),
-    )
-
-    task_entry_id = await network_broker.send_task(
-        target_role,
-        {
-            "run_id": run_id,
-            "from_role": actor,
-            "queued_at": now_iso(),
-            "_attempt": 1,
-        },
-    )
-    return {
-        "run_id": run_id,
-        "action": action,
-        "status": state["status"],
-        "next_role": target_role,
-        "task_entry_id": task_entry_id,
-    }
+    finally:
+        await network_broker.release_approval_decision(run_id)
 
 
 @app.get("/api/network/runs/{run_id}/events")

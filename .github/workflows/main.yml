@@ -26,6 +26,10 @@ jobs:
       run: |
         python backend/scripts/check_parallel_mock_flow.py
 
+    - name: Run Mock Approval Gate Check
+      run: |
+        python backend/scripts/check_approval_gate_flow.py
+
   build-frontend:
     runs-on: ubuntu-latest
     steps:

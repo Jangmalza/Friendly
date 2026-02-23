@@ -103,9 +103,11 @@ OpenAI 쿼터 없이 병렬 워크플로우를 검증하려면 다음을 실행�
 
 ```bash
 python3 backend/scripts/check_parallel_mock_flow.py
+python3 backend/scripts/check_approval_gate_flow.py
 ```
 
 이 스크립트는 내부적으로 `NETWORK_MOCK_MODE=true`를 활성화하고 아래를 검증합니다.
 - 병렬 fan-out (`developer_backend`, `developer_frontend`)
 - fan-in merge 완료
 - 최종 상태가 `completed`인지 여부
+- 승인 게이트 대기/승인/반려 경로와 우회 차단 여부
