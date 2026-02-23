@@ -217,6 +217,14 @@ def initial_network_state(run_id: str, prompt: str, selected_model: str) -> Dict
         "parallel_phase": None,
         "parallel_expected_roles": [],
         "parallel_completed_roles": [],
+        "approval_stage": None,
+        "approval_requested_at": None,
+        "approval_pending_next_roles": [],
+        "approval_last_action": None,
+        "approval_last_stage": None,
+        "approval_last_actor": None,
+        "approval_last_note": "",
+        "approval_last_decision_at": None,
     }
 
 
@@ -250,6 +258,14 @@ def build_safe_event(
         "parallel_phase": state.get("parallel_phase"),
         "parallel_expected_roles": state.get("parallel_expected_roles", []),
         "parallel_completed_roles": state.get("parallel_completed_roles", []),
+        "approval_stage": state.get("approval_stage"),
+        "approval_requested_at": state.get("approval_requested_at"),
+        "approval_pending_next_roles": state.get("approval_pending_next_roles", []),
+        "approval_last_action": state.get("approval_last_action"),
+        "approval_last_stage": state.get("approval_last_stage"),
+        "approval_last_actor": state.get("approval_last_actor"),
+        "approval_last_note": state.get("approval_last_note", ""),
+        "approval_last_decision_at": state.get("approval_last_decision_at"),
         "message": note,
         "updated_at": now_iso(),
     }

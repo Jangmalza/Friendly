@@ -39,6 +39,7 @@
 - `NETWORK_QA_MAX_RETRIES` (기본값: `3`)
 - `NETWORK_NODE_TIMEOUT_SEC` (기본값: `420`)
 - `NETWORK_ENABLE_PARALLEL_DEVELOPERS` (기본값: `true`)
+- `NETWORK_APPROVAL_GATES` (기본값: 빈 값, 예: `pm,architect,qa`; 지정 단계 완료 후 디렉터 승인 전 대기)
 - `NETWORK_MOCK_MODE` (기본값: `false`, CI/로컬 결정적 dry-run 모드)
 - `NETWORK_MOCK_QA_FAIL` (기본값: `false`, true일 때 mock QA가 1회 실패 후 통과)
 - `LLM_MAX_ATTEMPTS` (기본값: `2`)
@@ -62,6 +63,8 @@
 - `POST /api/network/start`
   - 본문: `{ "prompt": "...", "selected_model": "gpt-4o-mini" }`
 - `GET /api/network/runs/{run_id}`
+- `POST /api/network/runs/{run_id}/approval`
+  - 본문: `{ "action": "approve|reject", "actor": "director-ui", "note": "...", "reject_to_role": "architect" }`
 - `GET /api/network/runs/{run_id}/events`
 - `WS /ws/network/{run_id}`
 - `GET /api/network/admin/queues`
@@ -76,6 +79,7 @@
 대시보드는 현재 `Network Chat PoC`에만 집중합니다.
 프롬프트를 입력하고 모델을 선택한 뒤 네트워크 실행을 시작할 수 있습니다.
 큐 메트릭과 DLQ 재처리를 위한 Operations 패널도 제공합니다.
+`NETWORK_APPROVAL_GATES`가 설정된 경우, 지정 단계 뒤에 승인 대기 패널(승인/반려 버튼)이 표시됩니다.
 
 기본 실행 경로는 병렬 팀 협업을 지원합니다.
 `pm -> architect -> (developer_backend || developer_frontend) -> merge -> tool_execution -> qa -> github_deploy`

@@ -28,6 +28,14 @@ interface WorkflowState {
   selected_model: string | null;
   error: string | null;
   status: string | null;
+  approval_stage: string | null;
+  approval_requested_at: string | null;
+  approval_pending_next_roles: string[];
+  approval_last_action: string | null;
+  approval_last_stage: string | null;
+  approval_last_actor: string | null;
+  approval_last_note: string | null;
+  approval_last_decision_at: string | null;
 }
 
 interface WorkflowMessage {
@@ -48,6 +56,14 @@ interface WorkflowMessage {
   error?: string;
   message?: string;
   updated_at?: string;
+  approval_stage?: string | null;
+  approval_requested_at?: string | null;
+  approval_pending_next_roles?: string[];
+  approval_last_action?: string | null;
+  approval_last_stage?: string | null;
+  approval_last_actor?: string | null;
+  approval_last_note?: string | null;
+  approval_last_decision_at?: string | null;
 }
 
 interface RuntimeTimelineItem {
@@ -118,6 +134,15 @@ interface DLQRequeueResponse {
   dlq_deleted?: boolean;
 }
 
+interface ApprovalDecisionResponse {
+  run_id?: string;
+  action?: string;
+  status?: string;
+  next_role?: string;
+  next_roles?: string[];
+  task_entry_id?: string;
+}
+
 interface RequeueCandidate {
   entryId: string;
   runId: string;
@@ -136,6 +161,7 @@ const NETWORK_ROLES = [
   "github_deploy",
 ] as const;
 type NetworkRole = (typeof NETWORK_ROLES)[number];
+const NETWORK_ROLE_SET = new Set<string>(NETWORK_ROLES);
 type RuntimeRoleFilter = "all" | "event" | NetworkRole;
 const WS_RECONNECT_DEFAULT_MAX_ATTEMPTS = 5;
 const WS_RECONNECT_DEFAULT_BASE_DELAY_MS = 1000;
@@ -167,6 +193,14 @@ const initialWorkflowState: WorkflowState = {
   selected_model: null,
   error: null,
   status: null,
+  approval_stage: null,
+  approval_requested_at: null,
+  approval_pending_next_roles: [],
+  approval_last_action: null,
+  approval_last_stage: null,
+  approval_last_actor: null,
+  approval_last_note: null,
+  approval_last_decision_at: null,
 };
 
 const buildWsBaseUrl = (): string => {
@@ -215,6 +249,9 @@ const asNumber = (value: unknown, fallback = 0): number => {
   }
   return fallback;
 };
+
+const isNetworkRole = (value: unknown): value is NetworkRole =>
+  typeof value === "string" && NETWORK_ROLE_SET.has(value);
 
 const clampInt = (value: number, min: number, max: number): number => {
   if (!Number.isFinite(value)) {
@@ -281,6 +318,9 @@ export default function Dashboard() {
   const [redriveEntryId, setRedriveEntryId] = useState<string | null>(null);
   const [adminError, setAdminError] = useState<string | null>(null);
   const [requeueCandidate, setRequeueCandidate] = useState<RequeueCandidate | null>(null);
+  const [approvalRejectRole, setApprovalRejectRole] = useState<NetworkRole>("pm");
+  const [approvalNote, setApprovalNote] = useState("");
+  const [approvalBusyAction, setApprovalBusyAction] = useState<"approve" | "reject" | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const lastNodeRef = useRef<string | null>(null);
@@ -386,6 +426,14 @@ export default function Dashboard() {
         selected_model?: string | null;
         total_tokens?: number;
         total_cost?: number;
+        approval_stage?: string | null;
+        approval_requested_at?: string | null;
+        approval_pending_next_roles?: string[];
+        approval_last_action?: string | null;
+        approval_last_stage?: string | null;
+        approval_last_actor?: string | null;
+        approval_last_note?: string | null;
+        approval_last_decision_at?: string | null;
       };
 
       if (activeRunIdRef.current !== runId) {
@@ -397,6 +445,18 @@ export default function Dashboard() {
       const selectedModelName = typeof payload.selected_model === "string" ? payload.selected_model : null;
       const totalTokens = typeof payload.total_tokens === "number" ? payload.total_tokens : undefined;
       const totalCost = typeof payload.total_cost === "number" ? payload.total_cost : undefined;
+      const approvalStage = typeof payload.approval_stage === "string" ? payload.approval_stage : null;
+      const approvalRequestedAt = typeof payload.approval_requested_at === "string" ? payload.approval_requested_at : null;
+      const approvalPendingNextRoles = Array.isArray(payload.approval_pending_next_roles)
+        ? payload.approval_pending_next_roles.filter((item): item is string => typeof item === "string")
+        : undefined;
+      const approvalLastAction = typeof payload.approval_last_action === "string" ? payload.approval_last_action : null;
+      const approvalLastStage = typeof payload.approval_last_stage === "string" ? payload.approval_last_stage : null;
+      const approvalLastActor = typeof payload.approval_last_actor === "string" ? payload.approval_last_actor : null;
+      const approvalLastNote = typeof payload.approval_last_note === "string" ? payload.approval_last_note : null;
+      const approvalLastDecisionAt = typeof payload.approval_last_decision_at === "string"
+        ? payload.approval_last_decision_at
+        : null;
 
       setWorkflowState((prev) => ({
         ...prev,
@@ -405,6 +465,14 @@ export default function Dashboard() {
         selected_model: selectedModelName ?? prev.selected_model,
         total_tokens: totalTokens ?? prev.total_tokens,
         total_cost: totalCost ?? prev.total_cost,
+        approval_stage: approvalStage,
+        approval_requested_at: approvalRequestedAt,
+        approval_pending_next_roles: approvalPendingNextRoles ?? prev.approval_pending_next_roles,
+        approval_last_action: approvalLastAction,
+        approval_last_stage: approvalLastStage,
+        approval_last_actor: approvalLastActor,
+        approval_last_note: approvalLastNote,
+        approval_last_decision_at: approvalLastDecisionAt,
       }));
 
       if (activeNode) {
@@ -425,6 +493,9 @@ export default function Dashboard() {
       } else if (status === "failed") {
         runTerminalRef.current = true;
         setIsRunning(false);
+        setIsReconnecting(false);
+      } else if (status === "waiting_approval") {
+        setIsRunning(true);
         setIsReconnecting(false);
       } else {
         setIsRunning(true);
@@ -469,6 +540,11 @@ export default function Dashboard() {
     const timer = window.setTimeout(() => setCopiedFilePath(null), 1200);
     return () => window.clearTimeout(timer);
   }, [copiedFilePath]);
+
+  useEffect(() => {
+    if (!isNetworkRole(workflowState.approval_stage)) return;
+    setApprovalRejectRole(workflowState.approval_stage);
+  }, [workflowState.approval_stage]);
 
   useEffect(() => {
     const maxAttempts = clampInt(reconnectMaxAttempts, 1, 20);
@@ -647,6 +723,53 @@ export default function Dashboard() {
     }
   };
 
+  const handleApprovalDecision = async (action: "approve" | "reject") => {
+    if (!currentClientId) return;
+    if (workflowState.status !== "waiting_approval") {
+      addEvent("[APPROVAL] 현재 승인 대기 상태가 아닙니다.");
+      return;
+    }
+
+    setApprovalBusyAction(action);
+    try {
+      const response = await fetch(`${buildApiBaseUrl()}/api/network/runs/${currentClientId}/approval`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          actor: "director-ui",
+          note: approvalNote.trim() || undefined,
+          reject_to_role: action === "reject" ? approvalRejectRole : undefined,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error(await extractErrorMessage(response));
+      }
+
+      const payload = (await response.json()) as ApprovalDecisionResponse;
+      const nextRole = payload.next_role ?? "-";
+      const nextRoles = Array.isArray(payload.next_roles) ? payload.next_roles.join(", ") : "";
+
+      if (action === "approve") {
+        addEvent(`[APPROVAL] 승인 완료. next=${nextRoles || nextRole}`);
+      } else {
+        addEvent(`[APPROVAL] 반려 완료. reroute=${nextRole}`);
+      }
+
+      if (payload.status) {
+        setWorkflowState((prev) => ({ ...prev, status: payload.status ?? prev.status }));
+      }
+      setApprovalNote("");
+      await syncRunSnapshot(currentClientId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Approval decision failed";
+      setWorkflowState((prev) => ({ ...prev, error: message }));
+      addEvent(`[ERROR] ${message}`);
+    } finally {
+      setApprovalBusyAction(null);
+    }
+  };
+
   const handleWorkflowMessage = (raw: WorkflowMessage) => {
     if (raw.error) {
       runTerminalRef.current = true;
@@ -669,6 +792,20 @@ export default function Dashboard() {
     if (raw.active_node !== undefined) patch.active_node = raw.active_node;
     if (raw.status !== undefined) patch.status = raw.status;
     if (raw.selected_model !== undefined) patch.selected_model = raw.selected_model ?? null;
+    if (raw.approval_stage !== undefined) patch.approval_stage = raw.approval_stage ?? null;
+    if (raw.approval_requested_at !== undefined) patch.approval_requested_at = raw.approval_requested_at ?? null;
+    if (raw.approval_pending_next_roles !== undefined) {
+      patch.approval_pending_next_roles = Array.isArray(raw.approval_pending_next_roles)
+        ? raw.approval_pending_next_roles.filter((item): item is string => typeof item === "string")
+        : [];
+    }
+    if (raw.approval_last_action !== undefined) patch.approval_last_action = raw.approval_last_action ?? null;
+    if (raw.approval_last_stage !== undefined) patch.approval_last_stage = raw.approval_last_stage ?? null;
+    if (raw.approval_last_actor !== undefined) patch.approval_last_actor = raw.approval_last_actor ?? null;
+    if (raw.approval_last_note !== undefined) patch.approval_last_note = raw.approval_last_note ?? null;
+    if (raw.approval_last_decision_at !== undefined) {
+      patch.approval_last_decision_at = raw.approval_last_decision_at ?? null;
+    }
 
     if (Object.keys(patch).length > 0) {
       setWorkflowState((prev) => ({ ...prev, ...patch }));
@@ -741,6 +878,11 @@ export default function Dashboard() {
       setWorkflowState((prev) => ({ ...prev, error: raw.message ?? prev.error ?? "Workflow failed" }));
       addEvent(`Workflow failed.${raw.message ? ` ${raw.message}` : ""}`);
       return;
+    }
+
+    if (raw.status === "waiting_approval") {
+      setIsReconnecting(false);
+      setIsRunning(true);
     }
 
     if (raw.status && raw.status !== "completed") {
@@ -852,6 +994,9 @@ export default function Dashboard() {
     ]);
     setCurrentClientId(null);
     setActiveAgent("pm");
+    setApprovalNote("");
+    setApprovalBusyAction(null);
+    setApprovalRejectRole("pm");
     setIsConnected(false);
     setIsReconnecting(false);
     setIsRunning(true);
@@ -946,16 +1091,28 @@ export default function Dashboard() {
   const pendingTotal = orderedQueueInfos.reduce((acc, item) => acc + item.group.pending, 0);
   const dlqTotal = orderedQueueInfos.reduce((acc, item) => acc + item.dlq_length, 0);
   const consumerTotal = orderedQueueInfos.reduce((acc, item) => acc + item.group.consumers, 0);
+  const approvalRequestedLabel = workflowState.approval_requested_at
+    ? toTimeLabel(workflowState.approval_requested_at)
+    : "-";
+  const approvalLastDecisionLabel = workflowState.approval_last_decision_at
+    ? toTimeLabel(workflowState.approval_last_decision_at)
+    : "-";
+  const approvalPendingRolesLabel = workflowState.approval_pending_next_roles.length > 0
+    ? workflowState.approval_pending_next_roles.join(", ")
+    : "-";
 
-  const statusLabel = !isRunning
-    ? "대기"
-    : isConnected
-      ? "실행 중"
-      : isReconnecting
-        ? "재연결 중"
-        : "연결 중";
-  const statusClass = !isRunning ? "tag-rose" : isConnected ? "tag-teal" : "tag-amber";
-  const statusDotClass = !isRunning ? "status-idle" : isConnected ? "status-live" : "status-wait";
+  const waitingApproval = workflowState.status === "waiting_approval";
+  const statusLabel = waitingApproval
+    ? "승인 대기"
+    : !isRunning
+      ? "대기"
+      : isConnected
+        ? "실행 중"
+        : isReconnecting
+          ? "재연결 중"
+          : "연결 중";
+  const statusClass = waitingApproval ? "tag-amber" : !isRunning ? "tag-rose" : isConnected ? "tag-teal" : "tag-amber";
+  const statusDotClass = waitingApproval ? "status-wait" : !isRunning ? "status-idle" : isConnected ? "status-live" : "status-wait";
   const handleCopySelectedCode = async () => {
     if (!selectedCode || !selectedFile) return;
     try {
@@ -1036,6 +1193,70 @@ export default function Dashboard() {
             </span>
             <span className="tag tag-rose mono">updated {lastUpdateAt ?? "-"}</span>
           </div>
+
+          {waitingApproval && (
+            <div className="mt-3 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="text-xs font-semibold text-amber-100">디렉터 승인 대기</p>
+                <span className="tag tag-amber mono">requested {approvalRequestedLabel}</span>
+              </div>
+
+              <div className="mt-2 grid gap-2 sm:grid-cols-2 text-[11px] text-amber-100/90">
+                <p>stage: <span className="mono">{workflowState.approval_stage ?? "-"}</span></p>
+                <p>next: <span className="mono">{approvalPendingRolesLabel}</span></p>
+                <p>last_action: <span className="mono">{workflowState.approval_last_action ?? "-"}</span></p>
+                <p>last_decision: <span className="mono">{approvalLastDecisionLabel}</span></p>
+              </div>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-[180px_1fr]">
+                <label className="text-[11px] text-amber-100/90">
+                  반려 대상 role
+                  <select
+                    value={approvalRejectRole}
+                    onChange={(event) => setApprovalRejectRole(event.target.value as NetworkRole)}
+                    disabled={approvalBusyAction !== null}
+                    className="mt-1 w-full rounded-md border border-amber-400/35 bg-[#1b2737] px-2 py-1.5 text-xs mono outline-none focus:ring-2 focus:ring-amber-500/30 disabled:opacity-60"
+                  >
+                    {NETWORK_ROLES.map((roleName) => (
+                      <option key={roleName} value={roleName}>
+                        {roleName}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="text-[11px] text-amber-100/90">
+                  코멘트
+                  <input
+                    type="text"
+                    value={approvalNote}
+                    onChange={(event) => setApprovalNote(event.target.value)}
+                    disabled={approvalBusyAction !== null}
+                    placeholder="예: API 스펙 보강 후 재검토"
+                    className="mt-1 w-full rounded-md border border-amber-400/35 bg-[#1b2737] px-2 py-1.5 text-xs outline-none focus:ring-2 focus:ring-amber-500/30 disabled:opacity-60"
+                  />
+                </label>
+              </div>
+
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { void handleApprovalDecision("approve"); }}
+                  disabled={!currentClientId || approvalBusyAction !== null}
+                  className="rounded-lg border border-teal-700/35 bg-teal-700 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60 hover:bg-teal-600"
+                >
+                  {approvalBusyAction === "approve" ? "승인 처리 중..." : "승인"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleApprovalDecision("reject"); }}
+                  disabled={!currentClientId || approvalBusyAction !== null}
+                  className="rounded-lg border border-rose-500/35 bg-rose-700 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-60 hover:bg-rose-600"
+                >
+                  {approvalBusyAction === "reject" ? "반려 처리 중..." : "반려"}
+                </button>
+              </div>
+            </div>
+          )}
 
           <div className="mt-3 grid gap-2 sm:grid-cols-3 lg:max-w-3xl">
             <label className="text-[11px] text-[color:var(--text-muted)]">

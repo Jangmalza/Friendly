@@ -3,7 +3,7 @@ import asyncio
 import os
 import socket
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from uuid import uuid4
 
 from app.workflow.nodes import (
@@ -94,6 +94,22 @@ def _parse_bool_env(key: str, default: bool) -> bool:
     return default
 
 
+def _parse_role_set_env(key: str) -> Set[str]:
+    raw = os.environ.get(key)
+    if raw is None:
+        return set()
+
+    allowed_roles = set(ROLE_TO_NODE.keys())
+    parsed: Set[str] = set()
+    for token in str(raw).split(","):
+        role = token.strip()
+        if not role:
+            continue
+        if role in allowed_roles:
+            parsed.add(role)
+    return parsed
+
+
 def _build_consumer_name(role: str) -> str:
     override = os.environ.get("NETWORK_TASK_CONSUMER_NAME")
     if override and override.strip():
@@ -123,6 +139,7 @@ class DistributedWorker:
         self.qa_max_retries = _parse_int_env("NETWORK_QA_MAX_RETRIES", MAX_RETRIES_DEFAULT)
         self.node_timeout_sec = _parse_int_env("NETWORK_NODE_TIMEOUT_SEC", 420)
         self.enable_parallel_developers = _parse_bool_env("NETWORK_ENABLE_PARALLEL_DEVELOPERS", True)
+        self.approval_gate_roles = _parse_role_set_env("NETWORK_APPROVAL_GATES")
 
     async def run_forever(self) -> None:
         await self.broker.ensure_task_group(self.role, self.task_group_name, start_id="0-0")
@@ -214,6 +231,76 @@ class DistributedWorker:
             return text
         return f"{text[:limit]}...(truncated)"
 
+    @staticmethod
+    def _clear_approval_context(state: Dict[str, Any]) -> None:
+        state["approval_stage"] = None
+        state["approval_requested_at"] = None
+        state["approval_pending_next_roles"] = []
+
+    def _requires_approval_gate(
+        self,
+        *,
+        next_roles: List[str],
+        terminal_status: Optional[str],
+    ) -> bool:
+        if terminal_status is not None:
+            return False
+        if not next_roles:
+            return False
+        return self.role in self.approval_gate_roles
+
+    async def _mark_waiting_for_approval(
+        self,
+        run_id: str,
+        state: Dict[str, Any],
+        *,
+        next_roles: List[str],
+    ) -> None:
+        normalized_roles = [role for role in next_roles if role in ROLE_TO_NODE]
+        if not normalized_roles:
+            raise RuntimeError("Approval gate is configured, but no valid next roles were found.")
+
+        self._clear_approval_context(state)
+        state["status"] = "waiting_approval"
+        state["next_role"] = None
+        state["approval_stage"] = self.role
+        state["approval_requested_at"] = now_iso()
+        state["approval_pending_next_roles"] = normalized_roles
+        state["updated_at"] = now_iso()
+        await self.broker.save_state(run_id, state)
+
+        next_roles_text = ", ".join(normalized_roles)
+        await self.broker.append_event(
+            run_id,
+            build_safe_event(
+                run_id,
+                state,
+                status="waiting_approval",
+                from_role=self.role,
+                to_role="director",
+                event_type="workflow_status",
+                note=(
+                    f"[{self.role}] director approval required before routing to: {next_roles_text}. "
+                    "Use /api/network/runs/{run_id}/approval to approve or reject."
+                ),
+            ),
+        )
+        await self.broker.append_event(
+            run_id,
+            build_safe_event(
+                run_id,
+                state,
+                status="waiting_approval",
+                from_role=self.role,
+                to_role="director",
+                event_type="agent_chat",
+                note=(
+                    f"@director {self.role} 단계 결과를 검토해주세요. "
+                    f"승인 시 다음 단계: {next_roles_text}"
+                ),
+            ),
+        )
+
     async def _handle_task_failure(
         self,
         entry_id: str,
@@ -286,9 +373,10 @@ class DistributedWorker:
         if state is None:
             return
 
-        if state.get("status") in {"completed", "failed"}:
+        if state.get("status") in {"completed", "failed", "waiting_approval"}:
             return
 
+        self._clear_approval_context(state)
         state["status"] = "queued"
         state["next_role"] = self.role
         state["updated_at"] = now_iso()
@@ -338,9 +426,10 @@ class DistributedWorker:
         if state is None:
             return
 
-        if state.get("status") in {"completed", "failed"}:
+        if state.get("status") in {"completed", "failed", "waiting_approval"}:
             return
 
+        self._clear_approval_context(state)
         state["status"] = "failed"
         state["next_role"] = None
         state["updated_at"] = now_iso()
@@ -445,7 +534,12 @@ class DistributedWorker:
         except Exception as exc:
             raise RuntimeError(f"[{self.role}] failed: {exc}") from exc
 
+        self._clear_approval_context(merged)
         next_roles, terminal_status, terminal_note = self._route_after_node(merged)
+
+        if self._requires_approval_gate(next_roles=next_roles, terminal_status=terminal_status):
+            await self._mark_waiting_for_approval(run_id, merged, next_roles=next_roles)
+            return
 
         if len(next_roles) > 1:
             await self._start_parallel_developer_phase(run_id, merged, next_roles)
@@ -596,6 +690,7 @@ class DistributedWorker:
         if not normalized_roles:
             raise RuntimeError("Parallel developer fan-out requested without valid roles.")
 
+        self._clear_approval_context(merged)
         merged["parallel_phase"] = phase
         merged["parallel_expected_roles"] = normalized_roles
         merged["parallel_completed_roles"] = []
@@ -677,6 +772,7 @@ class DistributedWorker:
         if latest_state is None or latest_state.get("status") in {"completed", "failed"}:
             return
 
+        self._clear_approval_context(latest_state)
         latest_state["status"] = "running"
         latest_state["next_role"] = "parallel_wait"
         latest_state["parallel_phase"] = phase
@@ -739,6 +835,7 @@ class DistributedWorker:
         if final_state is None or final_state.get("status") in {"completed", "failed"}:
             return
 
+        self._clear_approval_context(final_state)
         final_state["source_code"] = merged_source
         final_state["next_role"] = "tool_execution"
         final_state["parallel_phase"] = None
