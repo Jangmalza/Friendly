@@ -465,27 +465,27 @@ class DistributedWorker:
             ),
         )
 
-    async def _handle_task(self, task: Dict[str, Any]) -> None:
-        run_id = str(task.get("run_id", "")).strip()
-        if not run_id:
-            return
-
+    async def _load_runnable_state(self, run_id: str) -> Optional[Dict[str, Any]]:
         state = await self.broker.load_state(run_id)
         if state is None:
-            return
+            return None
 
         if state.get("status") in {"completed", "failed", "waiting_approval"}:
-            return
+            return None
 
         expected_role = state.get("next_role")
         if expected_role:
             normalized_expected = str(expected_role).strip()
             if normalized_expected == "parallel_wait":
                 if self.role not in PARALLEL_DEVELOPER_ROLES:
-                    return
+                    return None
             elif normalized_expected != self.role:
-                return
+                return None
 
+        return state
+
+    @staticmethod
+    def _normalize_selected_model(state: Dict[str, Any]) -> None:
         try:
             state["selected_model"] = (
                 resolve_model_name(state.get("selected_model"))
@@ -495,6 +495,7 @@ class DistributedWorker:
         except ValueError:
             state["selected_model"] = get_default_model()
 
+    async def _mark_processing_started(self, run_id: str, state: Dict[str, Any]) -> None:
         state["status"] = "running"
         state["current_active_agent"] = ROLE_ACTIVE_NODE.get(self.role, state.get("current_active_agent"))
         state["updated_at"] = now_iso()
@@ -524,37 +525,36 @@ class DistributedWorker:
             ),
         )
 
+    async def _execute_role_node(self, state: Dict[str, Any]) -> Dict[str, Any]:
         node_fn = ROLE_TO_NODE[self.role]
-
         try:
             update = await asyncio.wait_for(asyncio.to_thread(node_fn, state), timeout=self.node_timeout_sec)
-            merged = merge_state(state, update)
+            return merge_state(state, update)
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"[{self.role}] timed out after {self.node_timeout_sec} seconds.") from exc
         except Exception as exc:
             raise RuntimeError(f"[{self.role}] failed: {exc}") from exc
 
-        self._clear_approval_context(merged)
-        next_roles, terminal_status, terminal_note = self._route_after_node(merged)
-
-        if self._requires_approval_gate(next_roles=next_roles, terminal_status=terminal_status):
-            await self._mark_waiting_for_approval(run_id, merged, next_roles=next_roles)
-            return
-
-        if len(next_roles) > 1:
-            await self._start_parallel_developer_phase(run_id, merged, next_roles)
-            return
-
-        if self.role in PARALLEL_DEVELOPER_ROLES:
-            await self._finalize_parallel_developer_branch(run_id, merged)
-            return
-
-        next_role = next_roles[0] if next_roles else None
+    async def _save_post_node_state(
+        self,
+        run_id: str,
+        merged: Dict[str, Any],
+        *,
+        next_role: Optional[str],
+        terminal_status: Optional[str],
+    ) -> None:
         merged["next_role"] = next_role
         merged["updated_at"] = now_iso()
         merged["status"] = terminal_status or "running"
         await self.broker.save_state(run_id, merged)
 
+    async def _append_post_node_events(
+        self,
+        run_id: str,
+        merged: Dict[str, Any],
+        *,
+        next_role: Optional[str],
+    ) -> None:
         note = role_message_content(self.role, merged)
         await self.broker.append_event(
             run_id,
@@ -583,18 +583,24 @@ class DistributedWorker:
             ),
         )
 
-        if next_role:
-            await self.broker.send_task(
-                next_role,
-                {
-                    "run_id": run_id,
-                    "from_role": self.role,
-                    "queued_at": now_iso(),
-                    "_attempt": 1,
-                },
-            )
-            return
+    async def _queue_next_role(self, run_id: str, next_role: str) -> None:
+        await self.broker.send_task(
+            next_role,
+            {
+                "run_id": run_id,
+                "from_role": self.role,
+                "queued_at": now_iso(),
+                "_attempt": 1,
+            },
+        )
 
+    async def _append_terminal_workflow_event(
+        self,
+        run_id: str,
+        merged: Dict[str, Any],
+        *,
+        terminal_note: Optional[str],
+    ) -> None:
         await self.broker.append_event(
             run_id,
             build_safe_event(
@@ -606,6 +612,44 @@ class DistributedWorker:
                 note=terminal_note or "",
             ),
         )
+
+    async def _handle_task(self, task: Dict[str, Any]) -> None:
+        run_id = str(task.get("run_id", "")).strip()
+        if not run_id:
+            return
+
+        state = await self._load_runnable_state(run_id)
+        if state is None:
+            return
+
+        self._normalize_selected_model(state)
+        await self._mark_processing_started(run_id, state)
+        merged = await self._execute_role_node(state)
+
+        self._clear_approval_context(merged)
+        next_roles, terminal_status, terminal_note = self._route_after_node(merged)
+
+        if self._requires_approval_gate(next_roles=next_roles, terminal_status=terminal_status):
+            await self._mark_waiting_for_approval(run_id, merged, next_roles=next_roles)
+            return
+
+        if len(next_roles) > 1:
+            await self._start_parallel_developer_phase(run_id, merged, next_roles)
+            return
+
+        if self.role in PARALLEL_DEVELOPER_ROLES:
+            await self._finalize_parallel_developer_branch(run_id, merged)
+            return
+
+        next_role = next_roles[0] if next_roles else None
+        await self._save_post_node_state(run_id, merged, next_role=next_role, terminal_status=terminal_status)
+        await self._append_post_node_events(run_id, merged, next_role=next_role)
+
+        if next_role:
+            await self._queue_next_role(run_id, next_role)
+            return
+
+        await self._append_terminal_workflow_event(run_id, merged, terminal_note=terminal_note)
 
     @staticmethod
     def _as_int(value: Any, default: int = 0) -> int:
