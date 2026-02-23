@@ -22,10 +22,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r backend/requirements.txt
         
-    - name: Run Backend Tests
+    - name: Run Mock Parallel Flow Check
       run: |
-        # Add pytest execution when tests are implemented
-        echo "Placeholder for pytest..."
+        python backend/scripts/check_parallel_mock_flow.py
 
   build-frontend:
     runs-on: ubuntu-latest

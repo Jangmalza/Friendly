@@ -17,6 +17,8 @@ Current UI/operation focus is `Network Chat PoC`:
 - `redis`
 - `agent_pm`
 - `agent_architect`
+- `agent_developer_backend`
+- `agent_developer_frontend`
 - `agent_developer`
 - `agent_tool_execution`
 - `agent_qa`
@@ -36,6 +38,9 @@ Worker-related environment variables:
 - `NETWORK_TASK_CLAIM_INTERVAL_MS` (default: `10000`)
 - `NETWORK_QA_MAX_RETRIES` (default: `3`)
 - `NETWORK_NODE_TIMEOUT_SEC` (default: `420`)
+- `NETWORK_ENABLE_PARALLEL_DEVELOPERS` (default: `true`)
+- `NETWORK_MOCK_MODE` (default: `false`, CI/local deterministic dry-run mode)
+- `NETWORK_MOCK_QA_FAIL` (default: `false`, when true mock QA fails once then passes)
 - `LLM_MAX_ATTEMPTS` (default: `2`)
 - `LLM_RETRY_BACKOFF_SEC` (default: `1.0`)
 - `OPENAI_FALLBACK_MODELS` (default: `gpt-4.1,gpt-4o-mini`)
@@ -72,6 +77,9 @@ Dashboard is now focused on `Network Chat PoC` only.
 Enter a prompt, choose model, and start a network run.
 The dashboard also provides an Operations panel for queue metrics and DLQ redrive.
 
+Default execution path now supports parallel team collaboration:
+`pm -> architect -> (developer_backend || developer_frontend) -> merge -> tool_execution -> qa -> github_deploy`
+
 ### Regression Evaluation
 
 Run multi-prompt evaluation against the distributed API:
@@ -84,3 +92,16 @@ python3 backend/scripts/evaluate_network_runs.py \
 ```
 
 You can also pass `--prompts-file` with JSON/JSONL/TXT prompts.
+
+### CI Mock Validation
+
+To validate the parallel workflow without OpenAI quota, run:
+
+```bash
+python3 backend/scripts/check_parallel_mock_flow.py
+```
+
+This script enables `NETWORK_MOCK_MODE=true` internally and verifies:
+- parallel fan-out (`developer_backend`, `developer_frontend`)
+- fan-in merge completion
+- terminal status is `completed`

@@ -78,6 +78,87 @@ PROMPT_MAX_CHARS_PER_FILE = _read_int_env("PROMPT_MAX_CHARS_PER_FILE", 3000)
 PROMPT_MAX_TOTAL_SOURCE_CHARS = _read_int_env("PROMPT_MAX_TOTAL_SOURCE_CHARS", 24000)
 
 
+def _read_bool_env(key: str, default: bool = False) -> bool:
+    raw_value = os.environ.get(key)
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+    if not normalized:
+        return default
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _is_mock_mode() -> bool:
+    return _read_bool_env("NETWORK_MOCK_MODE", False)
+
+
+def _is_mock_qa_fail() -> bool:
+    return _read_bool_env("NETWORK_MOCK_QA_FAIL", False)
+
+
+def _mock_model_for_state(state: AgentState) -> str:
+    try:
+        return resolve_model_name(state.get("selected_model"))
+    except Exception:
+        return DEFAULT_MODEL
+
+
+def _mock_backend_source_code() -> Dict[str, str]:
+    return {
+        "backend/app/main.py": (
+            "from fastapi import FastAPI\n\n"
+            "app = FastAPI(title='Mock Parallel Backend')\n\n"
+            "@app.get('/health')\n"
+            "def health():\n"
+            "    return {'status': 'ok', 'source': 'backend-mock'}\n"
+        ),
+        "backend/tests/test_health.py": (
+            "from fastapi.testclient import TestClient\n"
+            "from backend.app.main import app\n\n"
+            "client = TestClient(app)\n\n"
+            "def test_health():\n"
+            "    response = client.get('/health')\n"
+            "    assert response.status_code == 200\n"
+            "    assert response.json()['status'] == 'ok'\n"
+        ),
+    }
+
+
+def _mock_frontend_source_code() -> Dict[str, str]:
+    return {
+        "frontend/src/App.tsx": (
+            "import React from 'react';\n\n"
+            "export default function App() {\n"
+            "  return <main><h1>Mock Parallel Frontend</h1></main>;\n"
+            "}\n"
+        ),
+        "frontend/src/App.test.tsx": (
+            "import { render, screen } from '@testing-library/react';\n"
+            "import App from './App';\n\n"
+            "test('renders title', () => {\n"
+            "  render(<App />);\n"
+            "  expect(screen.getByText('Mock Parallel Frontend')).toBeTruthy();\n"
+            "});\n"
+        ),
+    }
+
+
+def _mock_full_source_code() -> Dict[str, str]:
+    merged: Dict[str, str] = {}
+    merged.update(_mock_backend_source_code())
+    merged.update(_mock_frontend_source_code())
+    merged["README.md"] = (
+        "# Mock Generated Project\n\n"
+        "This project was generated in NETWORK_MOCK_MODE for CI validation."
+    )
+    return merged
+
+
 def get_available_models() -> List[str]:
     return list(AVAILABLE_MODELS)
 
@@ -405,6 +486,24 @@ def pm_node(state: AgentState) -> AgentState:
     """Requirement Analysis by PM Agent"""
     print("--- PM NODE ---")
     user_req = _truncate_text(state.get("user_requirement", ""), PROMPT_MAX_DOC_CHARS)
+
+    if _is_mock_mode():
+        used_model = _mock_model_for_state(state)
+        mock_doc = (
+            "# Mock PRD\n\n"
+            f"- 사용자 요구사항: {user_req or 'N/A'}\n"
+            "- 핵심 목표: 병렬 개발 파이프라인 검증\n"
+            "- 주요 기능: 백엔드 API + 프론트엔드 UI + 기본 테스트\n"
+            "- 비고: NETWORK_MOCK_MODE 경로에서 생성됨"
+        )
+        return {
+            "pm_document": mock_doc,
+            "selected_model": used_model,
+            "total_tokens": state.get("total_tokens", 0),
+            "total_cost": state.get("total_cost", 0.0),
+            "current_active_agent": "pm_node",
+            "messages": [AIMessage(content=f"[PM Mock 산출물]\n{mock_doc}")],
+        }
     
     prompt = ChatPromptTemplate.from_messages([
         ("system", PM_SYSTEM_PROMPT),
@@ -435,6 +534,25 @@ def architect_node(state: AgentState) -> AgentState:
     """Tech Stack & Directory Structure by Architect Agent"""
     print("--- ARCHITECT NODE ---")
     pm_doc = _truncate_text(state.get("pm_document", ""), PROMPT_MAX_DOC_CHARS)
+
+    if _is_mock_mode():
+        used_model = _mock_model_for_state(state)
+        mock_arch = (
+            "# Mock Architecture\n\n"
+            "- Backend: FastAPI mock service\n"
+            "- Frontend: React mock view\n"
+            "- Parallel Plan: developer_backend + developer_frontend fan-out/fan-in\n"
+            "- QA: deterministic PASS (unless NETWORK_MOCK_QA_FAIL=true)\n"
+            f"- PM 요약: {_truncate_text(pm_doc, 180)}"
+        )
+        return {
+            "architecture_document": mock_arch,
+            "selected_model": used_model,
+            "total_tokens": state.get("total_tokens", 0),
+            "total_cost": state.get("total_cost", 0.0),
+            "current_active_agent": "architect_node",
+            "messages": [AIMessage(content=f"[Architect Mock 산출물]\n{mock_arch}")],
+        }
     
     system_prompt = """당신은 15년 차 수석 소프트웨어 아키텍트입니다.
     PM이 작성한 기획서를 바탕으로 최적의 기술 스택, 시스템 아키텍처, 디렉토리 구조, 그리고 API 엔드포인트 명세서를 작성해야 합니다.
@@ -489,24 +607,38 @@ def _normalize_generated_files(files: Dict[str, Any]) -> Dict[str, str]:
             normalized[path] = json.dumps(content, ensure_ascii=False, indent=2)
     return normalized
 
-def developer_node(state: AgentState) -> AgentState:
-    """Code Generation by Developer Agent"""
-    print("--- DEVELOPER NODE ---")
-    
+
+def _generate_developer_code(
+    state: AgentState,
+    *,
+    node_name: str,
+    scope_instruction: str = "",
+) -> tuple[Dict[str, str], str, int, float]:
+    if _is_mock_mode():
+        used_model = _mock_model_for_state(state)
+        if node_name == "developer_backend_node":
+            return _mock_backend_source_code(), used_model, 0, 0.0
+        if node_name == "developer_frontend_node":
+            return _mock_frontend_source_code(), used_model, 0, 0.0
+        return _mock_full_source_code(), used_model, 0, 0.0
+
     pm_doc = _truncate_text(state.get("pm_document", ""), PROMPT_MAX_DOC_CHARS)
     arch_doc = _truncate_text(state.get("architecture_document", ""), PROMPT_MAX_DOC_CHARS)
-    
+
     system_prompt = """당신은 최고 수준의 시니어 소프트웨어 엔지니어입니다.
     제공된 기획서와 아키텍처 설계도를 바탕으로 실제 작동하는 완벽한 소스 코드를 작성하세요.
     반드시 제공된 도구 인터페이스(CodeOutput) 구조에 맞게 응답하십시오.
     """
+    if scope_instruction.strip():
+        system_prompt += f"\n\n추가 범위 지시사항:\n{scope_instruction.strip()}"
+
     human_prompt = "기획서:\n{pm_doc}\n\n아키텍처 설계도:\n{arch_doc}"
-    
+
     with get_openai_callback_safe() as cb:
         try:
             response, used_model = invoke_structured_with_fallback(
                 state=state,
-                node_name="developer_node",
+                node_name=node_name,
                 system_prompt=system_prompt,
                 human_prompt=human_prompt,
                 payload={"pm_doc": pm_doc, "arch_doc": arch_doc},
@@ -521,14 +653,67 @@ def developer_node(state: AgentState) -> AgentState:
             except Exception:
                 used_model = DEFAULT_MODEL
             source_code_dict = {"error.log": f"코드 생성(Structured Output) 실패:\n{str(e)}"}
-    
+
+    return source_code_dict, used_model, int(cb.total_tokens), float(cb.total_cost)
+
+
+def developer_node(state: AgentState) -> AgentState:
+    """Code Generation by Developer Agent"""
+    print("--- DEVELOPER NODE ---")
+    source_code_dict, used_model, token_delta, cost_delta = _generate_developer_code(
+        state,
+        node_name="developer_node",
+    )
+
     return {
         "source_code": source_code_dict,
         "selected_model": used_model,
-        "total_tokens": state.get("total_tokens", 0) + cb.total_tokens,
-        "total_cost": state.get("total_cost", 0.0) + cb.total_cost,
-        "current_active_agent": "tool_execution_node",
+        "total_tokens": state.get("total_tokens", 0) + token_delta,
+        "total_cost": state.get("total_cost", 0.0) + cost_delta,
+        "current_active_agent": "developer_node",
         "messages": [AIMessage(content=f"[개발자 코드 작성 완료] {len(source_code_dict)}개의 파일 생성됨.")]
+    }
+
+
+def developer_backend_node(state: AgentState) -> AgentState:
+    """Backend-focused code generation branch for parallel development."""
+    print("--- DEVELOPER BACKEND NODE ---")
+    source_code_dict, used_model, token_delta, cost_delta = _generate_developer_code(
+        state,
+        node_name="developer_backend_node",
+        scope_instruction=(
+            "백엔드/서버/API/데이터 모델/비즈니스 로직 중심으로 구현하세요. "
+            "프론트엔드 UI 코드는 최소화하고 필요한 경우 통합을 위한 최소 파일만 작성하세요."
+        ),
+    )
+    return {
+        "branch_source_code": source_code_dict,
+        "selected_model": used_model,
+        "token_usage_delta": token_delta,
+        "cost_usage_delta": cost_delta,
+        "current_active_agent": "developer_backend_node",
+        "messages": [AIMessage(content=f"[백엔드 개발 완료] {len(source_code_dict)}개의 파일 생성됨.")],
+    }
+
+
+def developer_frontend_node(state: AgentState) -> AgentState:
+    """Frontend-focused code generation branch for parallel development."""
+    print("--- DEVELOPER FRONTEND NODE ---")
+    source_code_dict, used_model, token_delta, cost_delta = _generate_developer_code(
+        state,
+        node_name="developer_frontend_node",
+        scope_instruction=(
+            "프론트엔드/UI/클라이언트 상호작용 중심으로 구현하세요. "
+            "백엔드 코드는 API 연동에 필요한 최소 스텁만 작성하세요."
+        ),
+    )
+    return {
+        "branch_source_code": source_code_dict,
+        "selected_model": used_model,
+        "token_usage_delta": token_delta,
+        "cost_usage_delta": cost_delta,
+        "current_active_agent": "developer_frontend_node",
+        "messages": [AIMessage(content=f"[프론트엔드 개발 완료] {len(source_code_dict)}개의 파일 생성됨.")],
     }
 
 def tool_execution_node(state: AgentState) -> AgentState:
@@ -563,6 +748,18 @@ def tool_execution_node(state: AgentState) -> AgentState:
         
         with open(full_path, "w", encoding="utf-8") as f:
             f.write(code_content)
+
+    if _is_mock_mode():
+        mock_log = (
+            "[MOCK] Docker sandbox execution skipped.\n"
+            f"[MOCK] Saved files: {len(source_code)}\n"
+            f"[MOCK] Workspace: {workspace_dir}"
+        )
+        return {
+            "execution_logs": [mock_log],
+            "current_active_agent": "tool_execution_node",
+            "messages": [AIMessage(content=f"[도구 실행 Mock 완료]\n{mock_log}")],
+        }
 
     # Docker SDK를 이용한 안전한 샌드박스 파이썬 실행
     try:
@@ -631,6 +828,36 @@ def qa_node(state: AgentState) -> AgentState:
     execution_logs = _truncate_text("\n".join(state.get("execution_logs", [])), PROMPT_MAX_LOG_CHARS)
     current_revision = state.get("revision_count", 0)
 
+    if _is_mock_mode():
+        used_model = _mock_model_for_state(state)
+        force_fail = _is_mock_qa_fail()
+        should_fail = force_fail and int(current_revision) < 1
+
+        if should_fail:
+            next_revision = int(current_revision) + 1
+            qa_report = (
+                "Mock QA detected issues intentionally for retry path validation.\n\n"
+                "**STATUS: FAIL**"
+            )
+            active_agent = "developer_node"
+        else:
+            next_revision = int(current_revision)
+            qa_report = (
+                "Mock QA passed. Source files and execution logs look consistent for CI path.\n\n"
+                "**STATUS: PASS**"
+            )
+            active_agent = "END"
+
+        return {
+            "qa_report": qa_report,
+            "selected_model": used_model,
+            "revision_count": next_revision,
+            "total_tokens": state.get("total_tokens", 0),
+            "total_cost": state.get("total_cost", 0.0),
+            "current_active_agent": active_agent,
+            "messages": [AIMessage(content=f"[QA Mock 검토 완료]\n{qa_report}")],
+        }
+
     system_prompt = """당신은 꼼꼼한 수석 QA 엔지니어이자 코드 리뷰어입니다.
     기획서, 작성된 소스 코드, 그리고 코드 실행 로그를 분석하여 버그, 보안 취약점, 혹은 기획 누락이 있는지 엄격하게 검토하세요.
     반드시 제공된 도구 인터페이스(QAReport) 구조에 맞게 응답하십시오.
@@ -684,6 +911,13 @@ import datetime
 def github_deploy_node(state: AgentState) -> AgentState:
     """Auto-Deploy to GitHub"""
     print("--- GITHUB DEPLOY NODE ---")
+
+    if _is_mock_mode():
+        deploy_log = "[Deploy Mock] NETWORK_MOCK_MODE enabled. GitHub deployment skipped."
+        return {
+            "current_active_agent": "END",
+            "messages": [AIMessage(content=deploy_log)],
+        }
     
     github_token = os.environ.get("GITHUB_ACCESS_TOKEN")
     if not github_token:
