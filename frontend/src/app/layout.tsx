@@ -14,8 +14,8 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AI Orchestrator Control Center",
-  description: "Distributed multi-agent engineering orchestration dashboard",
+  title: "AI Orchestrator Dashboard",
+  description: "멀티 에이전트 워크플로우 실행 및 운영 대시보드",
 };
 
 export default function RootLayout({

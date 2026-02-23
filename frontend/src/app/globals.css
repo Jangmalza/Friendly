@@ -6,29 +6,27 @@
 }
 
 :root {
-  --bg: #f3efe4;
-  --bg-2: #efe9db;
-  --surface: #fffdf7;
-  --surface-soft: #f8f4e9;
-  --line: #d8cdb7;
-  --text: #1f2a2d;
-  --text-muted: #5f6b6d;
-  --teal: #0f766e;
-  --teal-soft: #ccfbf1;
-  --amber: #b45309;
-  --amber-soft: #ffedd5;
-  --rose: #be123c;
-  --shadow-lg: 0 20px 42px rgba(66, 49, 20, 0.13);
-  --shadow-sm: 0 7px 18px rgba(66, 49, 20, 0.08);
+  --bg: #0d121b;
+  --bg-2: #111725;
+  --surface: #151c28;
+  --surface-soft: #101622;
+  --line: #2a3342;
+  --text: #e5ebf4;
+  --text-muted: #9aa6bd;
+  --teal: #50d2c0;
+  --teal-soft: rgba(80, 210, 192, 0.14);
+  --amber: #eebf6f;
+  --amber-soft: rgba(238, 191, 111, 0.14);
+  --rose: #ee8294;
+  --shadow-lg: 0 14px 30px rgba(4, 10, 18, 0.42);
+  --shadow-sm: 0 6px 16px rgba(4, 10, 18, 0.36);
 }
 
 body {
   min-height: 100vh;
   color: var(--text);
   background:
-    radial-gradient(1400px 700px at 6% 0%, rgba(20, 184, 166, 0.14), transparent 62%),
-    radial-gradient(1200px 620px at 92% -8%, rgba(217, 119, 6, 0.14), transparent 58%),
-    linear-gradient(140deg, var(--bg) 0%, var(--bg-2) 54%, #e8e1d1 100%);
+    linear-gradient(180deg, #0c1118 0%, var(--bg) 44%, var(--bg-2) 100%);
   font-family: var(--font-sans), sans-serif;
 }
 
@@ -44,13 +42,13 @@ body {
 }
 
 .app-shell::before {
-  content: "";
+  content: none;
   position: fixed;
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(to right, rgba(95, 107, 109, 0.09) 1px, transparent 1px),
-    linear-gradient(to bottom, rgba(95, 107, 109, 0.09) 1px, transparent 1px);
+    linear-gradient(to right, rgba(124, 146, 168, 0.09) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(124, 146, 168, 0.09) 1px, transparent 1px);
   background-size: 48px 48px;
   mask-image: radial-gradient(circle at 50% 32%, black 40%, transparent 85%);
   z-index: 0;
@@ -65,7 +63,7 @@ body {
 
 .panel {
   border: 1px solid var(--line);
-  background: color-mix(in srgb, var(--surface) 94%, white 6%);
+  background: var(--surface);
   border-radius: 0.55rem;
   box-shadow: var(--shadow-sm);
 }
@@ -75,11 +73,11 @@ body {
 }
 
 .panel-title {
-  font-size: 0.72rem;
-  letter-spacing: 0.11em;
-  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.04em;
+  text-transform: none;
   color: var(--text-muted);
-  font-weight: 700;
+  font-weight: 600;
 }
 
 .mono {
@@ -90,36 +88,35 @@ body {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  border-radius: 0.35rem;
+  border-radius: 0.3rem;
   border: 1px solid;
   padding: 0.24rem 0.62rem;
   font-size: 0.72rem;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .tag-teal {
-  border-color: color-mix(in srgb, var(--teal) 33%, white);
-  color: var(--teal);
+  border-color: color-mix(in srgb, var(--teal) 40%, #101826);
+  color: color-mix(in srgb, var(--teal) 72%, white 28%);
   background: var(--teal-soft);
 }
 
 .tag-amber {
-  border-color: color-mix(in srgb, var(--amber) 36%, white);
-  color: var(--amber);
+  border-color: color-mix(in srgb, var(--amber) 38%, #101826);
+  color: color-mix(in srgb, var(--amber) 72%, white 28%);
   background: var(--amber-soft);
 }
 
 .tag-rose {
-  border-color: color-mix(in srgb, var(--rose) 33%, white);
-  color: var(--rose);
-  background: color-mix(in srgb, var(--rose) 12%, white);
+  border-color: color-mix(in srgb, var(--rose) 38%, #101826);
+  color: color-mix(in srgb, var(--rose) 72%, white 28%);
+  background: color-mix(in srgb, var(--rose) 14%, transparent);
 }
 
 .status-dot {
   width: 0.5rem;
   height: 0.5rem;
   border-radius: 999px;
-  animation: pulse-dot 1.8s infinite ease-in-out;
 }
 
 .status-live {
@@ -144,63 +141,35 @@ body {
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgba(31, 42, 45, 0.22);
+  background: rgba(135, 149, 173, 0.28);
   border-radius: 4px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: rgba(31, 42, 45, 0.36);
+  background: rgba(135, 149, 173, 0.42);
 }
 
 .reveal {
-  opacity: 0;
-  animation: rise-in 0.55s ease forwards;
+  opacity: 1;
 }
 
 .soft-code {
-  background: #111827;
-  color: #d1fae5;
+  background: #0d1420;
+  color: #d4deed;
   border-radius: 0.38rem;
 }
 
 /* Make utility rounded classes in this app feel slightly sharper. */
-.app-shell .rounded-2xl {
-  border-radius: 0.7rem;
-}
-
 .app-shell .rounded-xl {
-  border-radius: 0.52rem;
+  border-radius: 0.48rem;
 }
 
 .app-shell .rounded-lg {
-  border-radius: 0.36rem;
+  border-radius: 0.34rem;
 }
 
 .app-shell .rounded-md {
-  border-radius: 0.24rem;
-}
-
-@keyframes rise-in {
-  from {
-    opacity: 0;
-    transform: translateY(12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
-@keyframes pulse-dot {
-  0%,
-  100% {
-    transform: scale(0.9);
-    opacity: 0.85;
-  }
-  50% {
-    transform: scale(1.15);
-    opacity: 1;
-  }
+  border-radius: 0.22rem;
 }
 
 @media (max-width: 768px) {

@@ -105,9 +105,14 @@ def role_message_content(role: str, state: Dict[str, Any]) -> str:
         return truncate_text(state.get("pm_document", "") or "")
     if role == "architect":
         return truncate_text(state.get("architecture_document", "") or "")
-    if role == "developer":
-        source_code = state.get("source_code") or {}
+    if role in {"developer", "developer_backend", "developer_frontend"}:
+        source_key = "source_code" if role == "developer" else "branch_source_code"
+        source_code = state.get(source_key) or {}
         if isinstance(source_code, dict):
+            if role == "developer_backend":
+                return f"Generated {len(source_code)} files. [backend branch]"
+            if role == "developer_frontend":
+                return f"Generated {len(source_code)} files. [frontend branch]"
             return f"Generated {len(source_code)} files."
         return "Developer step finished."
     if role == "tool_execution":
@@ -142,12 +147,18 @@ def role_chat_content(role: str, state: Dict[str, Any], next_role: Optional[str]
             f"{truncate_text(headline, limit=240)}"
         )
 
-    if role == "developer":
-        source_code = state.get("source_code") or {}
+    if role in {"developer", "developer_backend", "developer_frontend"}:
+        source_key = "source_code" if role == "developer" else "branch_source_code"
+        source_code = state.get(source_key) or {}
         file_count = len(source_code) if isinstance(source_code, dict) else 0
         file_preview = _summarize_source_files(source_code)
+        branch_label = ""
+        if role == "developer_backend":
+            branch_label = " (backend branch)"
+        elif role == "developer_frontend":
+            branch_label = " (frontend branch)"
         return (
-            f"@{target} 구현 완료. 생성 파일 {file_count}개 "
+            f"@{target} 구현 완료{branch_label}. 생성 파일 {file_count}개 "
             f"({truncate_text(file_preview, limit=200)})."
         )
 
@@ -203,6 +214,9 @@ def initial_network_state(run_id: str, prompt: str, selected_model: str) -> Dict
         "total_cost": 0.0,
         "execution_logs": [],
         "messages": [],
+        "parallel_phase": None,
+        "parallel_expected_roles": [],
+        "parallel_completed_roles": [],
     }
 
 
@@ -233,6 +247,9 @@ def build_safe_event(
         "total_tokens": state.get("total_tokens", 0),
         "total_cost": state.get("total_cost", 0.0),
         "selected_model": state.get("selected_model"),
+        "parallel_phase": state.get("parallel_phase"),
+        "parallel_expected_roles": state.get("parallel_expected_roles", []),
+        "parallel_completed_roles": state.get("parallel_completed_roles", []),
         "message": note,
         "updated_at": now_iso(),
     }

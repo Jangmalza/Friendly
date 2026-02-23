@@ -14,7 +14,16 @@ from app.workflow.nodes import get_available_models, get_default_model, get_fall
 
 app = FastAPI(title="AI Orchestrator API")
 network_broker = RedisStreamBroker()
-NETWORK_ROLES = ("pm", "architect", "developer", "tool_execution", "qa", "github_deploy")
+NETWORK_ROLES = (
+    "pm",
+    "architect",
+    "developer_backend",
+    "developer_frontend",
+    "developer",
+    "tool_execution",
+    "qa",
+    "github_deploy",
+)
 
 origins = ["*"]
 
@@ -98,6 +107,9 @@ def _network_run_summary(run_id: str, state: Dict[str, Any]) -> Dict[str, Any]:
         "run_id": run_id,
         "status": state.get("status", "unknown"),
         "next_role": state.get("next_role"),
+        "parallel_phase": state.get("parallel_phase"),
+        "parallel_expected_roles": state.get("parallel_expected_roles", []),
+        "parallel_completed_roles": state.get("parallel_completed_roles", []),
         "selected_model": state.get("selected_model", get_default_model()),
         "active_node": state.get("current_active_agent"),
         "total_tokens": state.get("total_tokens", 0),

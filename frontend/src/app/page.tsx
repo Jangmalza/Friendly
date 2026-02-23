@@ -125,7 +125,16 @@ interface RequeueCandidate {
 }
 
 const FALLBACK_MODELS = ["gpt-4o-mini", "gpt-4o", "gpt-4.1", "gpt-5-mini", "gpt-5"];
-const NETWORK_ROLES = ["pm", "architect", "developer", "tool_execution", "qa", "github_deploy"] as const;
+const NETWORK_ROLES = [
+  "pm",
+  "architect",
+  "developer_backend",
+  "developer_frontend",
+  "developer",
+  "tool_execution",
+  "qa",
+  "github_deploy",
+] as const;
 type NetworkRole = (typeof NETWORK_ROLES)[number];
 type RuntimeRoleFilter = "all" | "event" | NetworkRole;
 const WS_RECONNECT_DEFAULT_MAX_ATTEMPTS = 5;
@@ -353,13 +362,15 @@ export default function Dashboard() {
   };
 
   const getRoleTone = (role: string) => {
-    if (role === "pm") return "border-amber-400/40 bg-amber-100/60 text-amber-800";
-    if (role === "architect") return "border-sky-400/40 bg-sky-100/60 text-sky-800";
-    if (role === "developer") return "border-teal-500/40 bg-teal-100/60 text-teal-800";
-    if (role === "tool_execution") return "border-cyan-500/40 bg-cyan-100/60 text-cyan-800";
-    if (role === "qa") return "border-rose-400/40 bg-rose-100/60 text-rose-800";
-    if (role === "github_deploy") return "border-indigo-400/40 bg-indigo-100/60 text-indigo-800";
-    return "border-[color:var(--line)] bg-[#f8f2e5] text-[color:var(--text)]";
+    if (role === "pm") return "border-amber-400/45 bg-amber-500/18 text-amber-100";
+    if (role === "architect") return "border-sky-400/45 bg-sky-500/18 text-sky-100";
+    if (role === "developer" || role === "developer_backend" || role === "developer_frontend") {
+      return "border-teal-400/45 bg-teal-500/18 text-teal-100";
+    }
+    if (role === "tool_execution") return "border-cyan-400/45 bg-cyan-500/18 text-cyan-100";
+    if (role === "qa") return "border-rose-400/45 bg-rose-500/18 text-rose-100";
+    if (role === "github_deploy") return "border-indigo-400/45 bg-indigo-500/18 text-indigo-100";
+    return "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--text)]";
   };
 
   const syncRunSnapshot = async (runId: string): Promise<string | null> => {
@@ -937,12 +948,12 @@ export default function Dashboard() {
   const consumerTotal = orderedQueueInfos.reduce((acc, item) => acc + item.group.consumers, 0);
 
   const statusLabel = !isRunning
-    ? "Standby"
+    ? "대기"
     : isConnected
-      ? "Live session"
+      ? "실행 중"
       : isReconnecting
-        ? "Reconnecting"
-        : "Connecting";
+        ? "재연결 중"
+        : "연결 중";
   const statusClass = !isRunning ? "tag-rose" : isConnected ? "tag-teal" : "tag-amber";
   const statusDotClass = !isRunning ? "status-idle" : isConnected ? "status-live" : "status-wait";
   const handleCopySelectedCode = async () => {
@@ -961,13 +972,13 @@ export default function Dashboard() {
         <section className="panel panel-elevated p-5 md:p-7 reveal" style={{ animationDelay: "50ms" }}>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="max-w-4xl">
-              <p className="panel-title">Distributed Engineering Cockpit</p>
+              <p className="panel-title">워크플로우 대시보드</p>
               <h1 className="mt-2 text-2xl md:text-4xl font-semibold tracking-tight leading-tight">
-                AI Orchestrator Control Center
+                AI Orchestrator
               </h1>
               <p className="mt-3 text-sm md:text-[15px] text-[color:var(--text-muted)]">
-                네트워크 기반 멀티 에이전트 워크플로우를 실시간으로 시작, 추적, 복구하는 운영형 UI입니다.
-                모델 라우팅, 실행 이벤트, 큐 상태, DLQ Redrive를 한 화면에서 관리할 수 있습니다.
+                요청을 실행하고 팀 에이전트 대화, 생성 코드, 운영 큐 상태를 확인하는 화면입니다.
+                실행 제어와 장애 복구(DLQ Redrive)를 한곳에서 처리할 수 있습니다.
               </p>
             </div>
 
@@ -979,25 +990,25 @@ export default function Dashboard() {
               <span className="tag tag-teal mono">
                 run {currentClientId ? currentClientId.slice(0, 12) : "not-started"}
               </span>
-              <span className="tag tag-amber">Network Chat PoC</span>
+              <span className="tag tag-amber">Network Run</span>
             </div>
           </div>
 
-          <div className="mt-5 grid gap-3 lg:grid-cols-[1fr_220px_180px]">
+          <div className="mt-5 grid gap-2.5 lg:grid-cols-[1fr_180px_140px]">
             <textarea
-              rows={3}
+              rows={2}
               placeholder="예: 사용자 요구사항을 입력하면 PM→Architect→Developer→QA→Deploy 순으로 자동 개발 플로우를 실행합니다."
               value={prompt}
               onChange={(event) => setPrompt(event.target.value)}
               disabled={isRunning}
-              className="panel bg-[color:var(--surface-soft)] border-[color:var(--line)] p-3 text-sm resize-none outline-none focus:ring-2 focus:ring-teal-600/30 disabled:opacity-70"
+              className="panel bg-[color:var(--surface-soft)] border-[color:var(--line)] px-3 py-2 text-[13px] resize-none outline-none focus:ring-2 focus:ring-teal-600/30 disabled:opacity-70"
             />
 
             <select
               value={selectedModel}
               onChange={(event) => setSelectedModel(event.target.value)}
               disabled={isRunning}
-              className="panel bg-[color:var(--surface-soft)] border-[color:var(--line)] px-3 py-3 text-sm outline-none focus:ring-2 focus:ring-teal-600/30 disabled:opacity-70"
+              className="panel bg-[color:var(--surface-soft)] border-[color:var(--line)] px-2.5 py-2 text-[13px] outline-none focus:ring-2 focus:ring-teal-600/30 disabled:opacity-70"
             >
               {modelOptions.map((modelName) => (
                 <option key={modelName} value={modelName}>
@@ -1010,10 +1021,10 @@ export default function Dashboard() {
               type="button"
               onClick={handleStartWorkflow}
               disabled={!prompt.trim() || isRunning}
-              className="rounded-xl border border-teal-700/40 bg-teal-700 text-white px-4 py-3 text-sm font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-55 transition-colors hover:bg-teal-600"
+              className="rounded-xl border border-teal-700/40 bg-teal-700 text-white px-3.5 py-2 text-[13px] font-semibold inline-flex items-center justify-center gap-2 disabled:opacity-55 transition-colors hover:bg-teal-600"
             >
               <Play className="w-4 h-4" />
-              {isRunning ? "Running..." : "Start Run"}
+              {isRunning ? "실행 중..." : "실행"}
             </button>
           </div>
 
@@ -1087,7 +1098,7 @@ export default function Dashboard() {
               className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
                 showOperatorPanel
                   ? "border-teal-700/35 bg-teal-700 text-white hover:bg-teal-600"
-                  : "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--text-muted)] hover:bg-[#efe8d8]"
+                  : "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--text-muted)] hover:bg-[#1b2737]"
               }`}
             >
               {showOperatorPanel ? "운영 패널 숨기기" : "운영 패널 보기"}
@@ -1127,7 +1138,7 @@ export default function Dashboard() {
 
         <section className="panel p-4 md:p-5 reveal" style={{ animationDelay: "150ms" }}>
           <div className="flex items-center justify-between gap-4">
-            <p className="panel-title">Pipeline Progress</p>
+            <p className="panel-title">진행 상태</p>
             <span className="mono text-xs text-[color:var(--text-muted)]">{progressPercent}%</span>
           </div>
           <div className="mt-3 h-2 rounded-full bg-[color:var(--line)] overflow-hidden">
@@ -1143,7 +1154,7 @@ export default function Dashboard() {
                 key={agent.id}
                 className={`rounded-xl border p-3 transition-all ${
                   activeAgent === agent.id
-                    ? "border-teal-600/50 bg-teal-100/55"
+                    ? "border-teal-400/45 bg-teal-500/16"
                     : "border-[color:var(--line)] bg-[color:var(--surface-soft)]"
                 }`}
               >
@@ -1175,7 +1186,7 @@ export default function Dashboard() {
           <div className="panel p-4 md:p-5 min-h-[460px]">
             <div className="flex items-center gap-2 pb-3 border-b border-[color:var(--line)]">
               <Activity className="w-4 h-4" />
-              <p className="panel-title">Runtime Feed</p>
+              <p className="panel-title">실행 로그</p>
             </div>
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <input
@@ -1189,7 +1200,7 @@ export default function Dashboard() {
                 <select
                   value={runtimeRoleFilter}
                   onChange={(event) => setRuntimeRoleFilter(event.target.value as RuntimeRoleFilter)}
-                  className="rounded border border-[color:var(--line)] bg-white px-1 py-0.5 text-[10px] outline-none"
+                  className="rounded border border-[color:var(--line)] bg-[color:var(--surface)] px-1 py-0.5 text-[10px] outline-none"
                 >
                   <option value="all">all</option>
                   <option value="event">event-only</option>
@@ -1221,7 +1232,7 @@ export default function Dashboard() {
                     },
                   ]);
                 }}
-                className="rounded-md border border-[color:var(--line)] bg-white px-2 py-1 text-[10px] mono hover:bg-[#efe8d8]"
+                className="rounded-md border border-[color:var(--line)] bg-[color:var(--surface)] px-2 py-1 text-[10px] mono hover:bg-[#1b2737]"
               >
                 clear
               </button>
@@ -1233,7 +1244,7 @@ export default function Dashboard() {
               <div className="flex items-center gap-1 mb-2">
                 <MessageCircle className="w-3 h-3" />
                 <p className="text-[11px] text-[color:var(--text-muted)] font-semibold">
-                  Unified Timeline ({filteredRuntimeTimeline.length}/{runtimeTimeline.length})
+                  대화/이벤트 타임라인 ({filteredRuntimeTimeline.length}/{runtimeTimeline.length})
                 </p>
               </div>
               {filteredRuntimeTimeline.length === 0 ? (
@@ -1248,7 +1259,7 @@ export default function Dashboard() {
                       className={`rounded-lg border p-2 ${
                         item.category === "chat"
                           ? getRoleTone(item.fromRole ?? "")
-                          : "border-[color:var(--line)] bg-[#f8f2e5] text-[color:var(--text)]"
+                          : "border-[color:var(--line)] bg-[color:var(--surface-soft)] text-[color:var(--text)]"
                       }`}
                     >
                       <p className="mono text-[10px] opacity-75">
@@ -1289,7 +1300,7 @@ export default function Dashboard() {
               type="button"
               onClick={() => { void handleCopySelectedCode(); }}
               disabled={!selectedCode}
-              className="rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-55 hover:bg-[#efe8d8]"
+              className="rounded-md border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-2.5 py-1.5 text-xs font-semibold disabled:opacity-55 hover:bg-[#1b2737]"
             >
               {copiedFilePath && copiedFilePath === selectedFile ? "Copied" : "Copy selected"}
             </button>
@@ -1311,8 +1322,8 @@ export default function Dashboard() {
                     onClick={() => setSelectedFile(path)}
                     className={`w-full text-left px-3 py-2 text-xs mono border-b border-[color:var(--line)] transition-colors ${
                       selectedFile === path
-                        ? "bg-teal-100 text-teal-800"
-                        : "text-[color:var(--text)] hover:bg-[#efe8d8]"
+                        ? "bg-teal-500/20 text-teal-100"
+                        : "text-[color:var(--text)] hover:bg-[#1b2737]"
                     }`}
                   >
                     {path}
@@ -1342,7 +1353,7 @@ export default function Dashboard() {
                 type="button"
                 onClick={() => { void refreshAdminPanel(true); }}
                 disabled={isQueueLoading || isDlqLoading}
-                className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-2 text-xs font-semibold disabled:opacity-60 hover:bg-[#ece4d4]"
+                className="inline-flex items-center gap-2 rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-2 text-xs font-semibold disabled:opacity-60 hover:bg-[#1b2737]"
               >
                 <RefreshCw className={`w-3 h-3 ${isQueueLoading || isDlqLoading ? "animate-spin" : ""}`} />
                 Refresh
@@ -1350,7 +1361,7 @@ export default function Dashboard() {
             </div>
 
             {adminError && (
-              <div className="mt-3 rounded-lg border border-rose-400/40 bg-rose-100 text-rose-700 p-2 text-xs">
+              <div className="mt-3 rounded-lg border border-rose-400/45 bg-rose-500/16 text-rose-100 p-2 text-xs">
                 {adminError}
               </div>
             )}
@@ -1431,7 +1442,7 @@ export default function Dashboard() {
                     <p className="mt-2 text-xs">run {summary.runId}</p>
                     <p className="text-xs text-[color:var(--text-muted)]">attempt {summary.attempt}/{summary.maxAttempts}</p>
                     <p className="text-xs text-[color:var(--text-muted)]">failed_at {summary.failedAt}</p>
-                    <p className="mt-2 text-xs text-rose-700 whitespace-pre-wrap break-words">{summary.error}</p>
+                    <p className="mt-2 text-xs text-rose-200 whitespace-pre-wrap break-words">{summary.error}</p>
                     <button
                       type="button"
                       onClick={() => {
@@ -1473,7 +1484,7 @@ export default function Dashboard() {
                 <button
                   type="button"
                   onClick={() => setRequeueCandidate(null)}
-                  className="rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-2 text-xs font-semibold hover:bg-[#ece4d4]"
+                  className="rounded-lg border border-[color:var(--line)] bg-[color:var(--surface-soft)] px-3 py-2 text-xs font-semibold hover:bg-[#1b2737]"
                 >
                   Cancel
                 </button>

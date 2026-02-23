@@ -43,6 +43,18 @@ class RedisStreamBroker:
     def dlq_stream(role: str) -> str:
         return f"agent:{role}:dlq"
 
+    @staticmethod
+    def parallel_candidate_key(run_id: str, role: str) -> str:
+        return f"run:{run_id}:parallel:candidate:{role}"
+
+    @staticmethod
+    def parallel_done_set_key(run_id: str, phase: str) -> str:
+        return f"run:{run_id}:parallel:{phase}:done"
+
+    @staticmethod
+    def parallel_merge_gate_key(run_id: str, phase: str) -> str:
+        return f"run:{run_id}:parallel:{phase}:merge_gate"
+
     async def save_state(self, run_id: str, state: Dict[str, Any]) -> None:
         client = await self.client()
         payload = json.dumps(to_jsonable(state), ensure_ascii=False)
@@ -107,6 +119,76 @@ class RedisStreamBroker:
         stream = self.event_stream(run_id)
         body = {"payload": json.dumps(to_jsonable(payload), ensure_ascii=False)}
         return await client.xadd(stream, body)
+
+    async def save_parallel_candidate(self, run_id: str, role: str, payload: Dict[str, Any]) -> None:
+        client = await self.client()
+        key = self.parallel_candidate_key(run_id, role)
+        value = json.dumps(to_jsonable(payload), ensure_ascii=False)
+        await client.set(key, value)
+
+    async def load_parallel_candidate(self, run_id: str, role: str) -> Optional[Dict[str, Any]]:
+        client = await self.client()
+        key = self.parallel_candidate_key(run_id, role)
+        raw = await client.get(key)
+        if not raw:
+            return None
+        payload = self._decode_payload(raw)
+        if not isinstance(payload, dict):
+            return None
+        return payload
+
+    async def load_parallel_candidates(
+        self,
+        run_id: str,
+        roles: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        candidates: Dict[str, Dict[str, Any]] = {}
+        for role in roles:
+            candidate = await self.load_parallel_candidate(run_id, role)
+            if candidate is not None:
+                candidates[role] = candidate
+        return candidates
+
+    async def mark_parallel_branch_done(self, run_id: str, phase: str, role: str) -> Tuple[bool, int]:
+        client = await self.client()
+        key = self.parallel_done_set_key(run_id, phase)
+        added = await client.sadd(key, role)
+        return bool(added), int(await client.scard(key))
+
+    async def get_parallel_done_roles(self, run_id: str, phase: str) -> List[str]:
+        client = await self.client()
+        key = self.parallel_done_set_key(run_id, phase)
+        items = await client.smembers(key)
+        if not items:
+            return []
+        return sorted(str(item) for item in items if str(item).strip())
+
+    async def try_acquire_parallel_merge(self, run_id: str, phase: str, *, ttl_sec: int = 120) -> bool:
+        client = await self.client()
+        key = self.parallel_merge_gate_key(run_id, phase)
+        timeout = max(1, int(ttl_sec))
+        acquired = await client.set(key, "1", nx=True, ex=timeout)
+        return bool(acquired)
+
+    async def reset_parallel_phase(
+        self,
+        run_id: str,
+        phase: str,
+        *,
+        roles: Optional[List[str]] = None,
+        clear_candidates: bool = False,
+    ) -> int:
+        client = await self.client()
+        delete_keys: List[str] = [
+            self.parallel_done_set_key(run_id, phase),
+            self.parallel_merge_gate_key(run_id, phase),
+        ]
+        if clear_candidates and roles:
+            delete_keys.extend(self.parallel_candidate_key(run_id, role) for role in roles)
+
+        if not delete_keys:
+            return 0
+        return int(await client.delete(*delete_keys))
 
     async def read_tasks(
         self,
